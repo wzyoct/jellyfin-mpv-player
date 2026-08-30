@@ -36,4 +36,3 @@ const subtitle = computed(() => {
     <span class="poster-info"><strong>{{ item.Name }}</strong><small>{{ subtitle }}</small></span>
   </button>
 </template>
-

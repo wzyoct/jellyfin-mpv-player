@@ -67,6 +67,7 @@ kbd { padding: 2px 5px; border: 1px solid #414249; border-radius: 4px; color: #7
 .section-heading { display: flex; align-items: end; justify-content: space-between; margin-bottom: 17px; }
 .section-heading .eyebrow { margin-bottom: 7px; }
 .section-heading h2, .library-strip h2 { margin: 0; font-family: 'Space Grotesk', sans-serif; font-size: 23px; letter-spacing: 0; }
+.section-count, .library-count { display: inline-block; margin-top: 7px; color: #778692; font-size: 11px; }
 .text-button { display: inline-flex; align-items: center; gap: 4px; padding: 4px 0; border: 0; background: transparent; color: #a4a5ab; font-size: 12px; }
 .text-button:hover { color: #fff; }
 .poster-row { display: grid; grid-auto-flow: column; grid-auto-columns: 164px; gap: 17px; overflow-x: auto; padding: 2px 0 13px; scrollbar-width: thin; scrollbar-color: #36373c transparent; }
@@ -89,6 +90,9 @@ kbd { padding: 2px 5px; border: 1px solid #414249; border-radius: 4px; color: #7
 .library-tabs { display: flex; flex-wrap: wrap; gap: 10px; }
 .library-tab { display: inline-flex; align-items: center; gap: 15px; min-width: 180px; padding: 15px 16px; border: 1px solid rgba(255,255,255,.1); border-radius: 7px; background: rgba(255,255,255,.03); color: #bebfc4; font-size: 13px; text-align: left; }
 .library-tab:hover, .library-tab.active { border-color: rgba(227,102,82,.7); color: #fff; background: rgba(227,102,82,.12); }
+.library-tab > span { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+.library-tab strong { overflow: hidden; font-size: 13px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
+.library-tab small { color: #778692; font-size: 10px; text-transform: capitalize; }
 .library-tab svg { margin-left: auto; color: #74757b; }
 .library-page { max-width: 1500px; margin: 0 auto; padding-top: 112px; }
 .library-page-heading { display: flex; align-items: end; justify-content: space-between; margin-bottom: 29px; }
@@ -203,4 +207,9 @@ kbd { padding: 2px 5px; border: 1px solid #414249; border-radius: 4px; color: #7
   .standalone-brand { margin-bottom: 35px; }
   .standalone-intro h1 { font-size: 42px; }
   .settings-form { max-width: none; }
+}
+
+@media (max-height: 760px) {
+  .hero-section { min-height: 540px; }
+  .hero-content { padding-top: 175px; }
 }

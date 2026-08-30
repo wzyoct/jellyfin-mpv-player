@@ -589,18 +589,18 @@ onUnmounted(() => {
         </section>
 
         <section v-if="views.length" class="library-strip">
-          <div class="section-heading"><div><p class="eyebrow">YOUR COLLECTIONS</p><h2>媒体库</h2></div></div>
-          <div class="library-tabs">
-            <button v-for="view in views" :key="view.Id" class="library-tab" :class="{ active: activeViewId === view.Id }" type="button" @click="activeViewId = view.Id; void loadLibrary(view.Id)">
-              <span>{{ view.Name }}</span><ChevronRight :size="16" />
-            </button>
+           <div class="section-heading"><div><p class="eyebrow">YOUR COLLECTIONS</p><h2>媒体库</h2></div><span class="section-count">{{ views.length }} 个集合</span></div>
+           <div class="library-tabs">
+             <button v-for="view in views" :key="view.Id" class="library-tab" :class="{ active: activeViewId === view.Id }" type="button" @click="activeViewId = view.Id; void loadLibrary(view.Id)">
+               <span><strong>{{ view.Name }}</strong><small>{{ view.CollectionType || '媒体库' }}</small></span><ChevronRight :size="16" />
+             </button>
           </div>
         </section>
       </template>
 
       <section v-else class="library-page">
         <div class="library-page-heading">
-          <div><p class="eyebrow">{{ activeView?.Name || 'YOUR LIBRARY' }}</p><h1>{{ activeFilter === 'Movie' ? '电影' : activeFilter === 'Series' ? '剧集' : '全部内容' }}</h1></div>
+           <div><p class="eyebrow">{{ activeView?.Name || 'YOUR LIBRARY' }}</p><h1>{{ activeFilter === 'Movie' ? '电影' : activeFilter === 'Series' ? '剧集' : '全部内容' }}</h1><span class="library-count">{{ displayItems.length }} 项</span></div>
           <div class="library-controls">
             <select v-model="activeViewId" class="select-input" aria-label="选择媒体库" @change="loadLibrary()">
               <option v-for="view in views" :key="view.Id" :value="view.Id">{{ view.Name }}</option>
