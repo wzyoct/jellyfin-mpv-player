@@ -21,6 +21,7 @@ import {
   X,
 } from 'lucide-vue-next'
 import PosterImage from './components/PosterImage.vue'
+import MediaCard from './components/MediaCard.vue'
 import type {
   EmbyItem,
   EmbyView,
@@ -42,6 +43,8 @@ const libraryItems = ref<EmbyItem[]>([])
 const latestItems = ref<EmbyItem[]>([])
 const searchResults = ref<EmbyItem[]>([])
 const searchTerm = ref('')
+const searchLoading = ref(false)
+const searchError = ref('')
 const selectedItem = ref<EmbyItem | null>(null)
 const playbackInfo = ref<PlaybackInfo | null>(null)
 const seasonItems = ref<EmbyItem[]>([])
@@ -64,6 +67,7 @@ let noticeTimer: ReturnType<typeof setTimeout> | undefined
 let removeMpvListener: (() => void) | undefined
 let homeRequestId = 0
 let libraryRequestId = 0
+let searchRequestId = 0
 
 const form = reactive({
   serverUrl: 'http://127.0.0.1:8096',
@@ -106,12 +110,6 @@ function formatRuntime(ticks?: number): string {
   const hours = Math.floor(totalMinutes / 60)
   const minutes = totalMinutes % 60
   return hours ? `${hours} 小时 ${minutes} 分钟` : `${minutes} 分钟`
-}
-
-function formatProgress(item: EmbyItem): number {
-  const position = item.UserData?.PlaybackPositionTicks || 0
-  if (!item.RunTimeTicks || !position) return 0
-  return Math.min(100, Math.round((position / item.RunTimeTicks) * 100))
 }
 
 function itemTypeLabel(item: EmbyItem): string {
@@ -299,8 +297,13 @@ async function performSearch(): Promise<void> {
   const term = searchTerm.value.trim()
   if (term.length < 2 || !isConnected.value) {
     searchResults.value = []
+    searchLoading.value = false
+    searchError.value = ''
     return
   }
+  const requestId = ++searchRequestId
+  searchLoading.value = true
+  searchError.value = ''
   try {
     const result = await window.emby.getItems({
       searchTerm: term,
@@ -309,9 +312,11 @@ async function performSearch(): Promise<void> {
       sortBy: 'SortName',
       limit: 36,
     })
-    searchResults.value = result.Items
+    if (requestId === searchRequestId) searchResults.value = result.Items
   } catch (error) {
-    showNotice(error instanceof Error ? error.message : '搜索失败', 'error')
+    if (requestId === searchRequestId) searchError.value = error instanceof Error ? error.message : '搜索失败'
+  } finally {
+    if (requestId === searchRequestId) searchLoading.value = false
   }
 }
 
@@ -572,21 +577,14 @@ onUnmounted(() => {
         <section v-if="continueItems.length" class="content-section">
           <div class="section-heading"><div><p class="eyebrow">PICK UP WHERE YOU LEFT OFF</p><h2>继续观看</h2></div><button class="text-button" type="button" @click="goLibrary('all')">查看全部<ChevronRight :size="16" /></button></div>
           <div class="poster-row">
-            <button v-for="item in continueItems" :key="item.Id" class="poster-card" type="button" @click="openDetails(item)">
-              <PosterImage :item="item" />
-              <span class="poster-progress"><span :style="{ width: `${formatProgress(item)}%` }"></span></span>
-              <span class="poster-info"><strong>{{ item.Name }}</strong><small>{{ item.SeriesName || itemTypeLabel(item) }}</small></span>
-            </button>
+            <MediaCard v-for="item in continueItems" :key="item.Id" :item="item" @select="openDetails" />
           </div>
         </section>
 
         <section v-if="featuredItems.length" class="content-section">
           <div class="section-heading"><div><p class="eyebrow">FRESH FROM YOUR LIBRARY</p><h2>最近加入</h2></div><button class="text-button" type="button" @click="goLibrary('all')">浏览片库<ChevronRight :size="16" /></button></div>
           <div class="poster-row">
-            <button v-for="item in featuredItems" :key="item.Id" class="poster-card" type="button" @click="openDetails(item)">
-              <PosterImage :item="item" />
-              <span class="poster-info"><strong>{{ item.Name }}</strong><small>{{ item.ProductionYear || itemTypeLabel(item) }}</small></span>
-            </button>
+            <MediaCard v-for="item in featuredItems" :key="item.Id" :item="item" @select="openDetails" />
           </div>
         </section>
 
@@ -613,11 +611,7 @@ onUnmounted(() => {
         <div v-if="libraryError" class="error-banner"><AlertCircle :size="18" />{{ libraryError }}<button class="text-button" type="button" @click="loadLibrary()">重试</button></div>
         <div v-if="libraryLoading" class="loading-state"><LoaderCircle class="spin" :size="24" />正在加载媒体库</div>
         <div v-else-if="displayItems.length" class="poster-grid">
-          <button v-for="item in displayItems" :key="item.Id" class="poster-card" type="button" @click="openDetails(item)">
-            <PosterImage :item="item" />
-            <span v-if="formatProgress(item)" class="poster-progress"><span :style="{ width: `${formatProgress(item)}%` }"></span></span>
-            <span class="poster-info"><strong>{{ item.Name }}</strong><small>{{ item.ProductionYear || itemTypeLabel(item) }}</small></span>
-          </button>
+          <MediaCard v-for="item in displayItems" :key="item.Id" :item="item" @select="openDetails" />
         </div>
         <div v-else class="empty-state"><Clapperboard :size="32" /><h3>这里还没有内容</h3><p>请检查媒体库权限或刷新连接。</p><button class="button button--ghost" type="button" @click="loadLibrary()"><RefreshCw :size="16" />重新加载</button></div>
       </section>
@@ -626,7 +620,9 @@ onUnmounted(() => {
     <div v-if="searchTerm.trim().length >= 2 && isConnected" class="search-drawer">
       <div class="search-drawer-inner">
         <div class="search-drawer-heading"><span>搜索结果</span><button class="icon-button" type="button" title="关闭搜索" @click="searchTerm = ''"><X :size="18" /></button></div>
-        <div v-if="!searchResults.length" class="search-empty">没有找到匹配内容</div>
+        <div v-if="searchLoading" class="search-empty search-state"><LoaderCircle class="spin" :size="17" />正在搜索</div>
+        <div v-else-if="searchError" class="search-empty search-state search-state--error"><AlertCircle :size="17" />{{ searchError }}<button class="text-button" type="button" @click="performSearch">重试</button></div>
+        <div v-else-if="!searchResults.length" class="search-empty">没有找到匹配内容</div>
         <div v-else class="search-results">
           <button v-for="item in searchResults" :key="item.Id" class="search-result" type="button" @click="openDetails(item)">
             <div class="search-result-art"><PosterImage :item="item" /></div>
