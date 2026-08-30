@@ -12,8 +12,10 @@ const props = withDefaults(defineProps<{
 
 const imageUrl = ref('')
 const loading = ref(true)
+let loadRequestId = 0
 
 async function loadImage(): Promise<void> {
+  const requestId = ++loadRequestId
   loading.value = true
   imageUrl.value = ''
   const imageType = props.variant === 'backdrop' ? 'Backdrop' : 'Primary'
@@ -25,16 +27,17 @@ async function loadImage(): Promise<void> {
     return
   }
   try {
-    imageUrl.value = await window.emby.getImage({
+    const nextImageUrl = await window.emby.getImage({
       itemId: props.item.Id,
       imageType,
       tag,
       maxWidth: props.variant === 'backdrop' ? 1280 : 480,
     })
+    if (requestId === loadRequestId) imageUrl.value = nextImageUrl
   } catch {
-    imageUrl.value = ''
+    if (requestId === loadRequestId) imageUrl.value = ''
   } finally {
-    loading.value = false
+    if (requestId === loadRequestId) loading.value = false
   }
 }
 

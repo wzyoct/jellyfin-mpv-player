@@ -295,13 +295,13 @@ async function disconnect(): Promise<void> {
 
 async function performSearch(): Promise<void> {
   const term = searchTerm.value.trim()
+  const requestId = ++searchRequestId
   if (term.length < 2 || !isConnected.value) {
     searchResults.value = []
     searchLoading.value = false
     searchError.value = ''
     return
   }
-  const requestId = ++searchRequestId
   searchLoading.value = true
   searchError.value = ''
   try {
@@ -596,7 +596,7 @@ onUnmounted(() => {
         <section v-if="views.length" class="library-strip">
            <div class="section-heading"><div><p class="eyebrow">YOUR COLLECTIONS</p><h2>媒体库</h2></div><span class="section-count">{{ views.length }} 个集合</span></div>
            <div class="library-tabs">
-             <button v-for="view in views" :key="view.Id" class="library-tab" :class="{ active: activeViewId === view.Id }" type="button" @click="activeViewId = view.Id; void loadLibrary(view.Id)">
+             <button v-for="view in views" :key="view.Id" class="library-tab" :class="{ active: activeViewId === view.Id }" type="button" @click="activeViewId = view.Id; activeFilter = 'all'; void loadLibrary(view.Id, 'all')">
                <span><strong>{{ view.Name }}</strong><small>{{ view.CollectionType || '媒体库' }}</small></span><ChevronRight :size="16" />
              </button>
           </div>
