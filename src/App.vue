@@ -439,6 +439,11 @@ function handleMpvStatus(status: MpvStatus): void {
 
 onMounted(async () => {
   window.addEventListener('keydown', handleKeydown)
+  if (!window.emby) {
+    errorMessage.value = '请通过 Ember Player 桌面应用启动此页面'
+    activePage.value = 'settings'
+    return
+  }
   try {
     const saved = await window.emby.getSettings()
     applySettings(saved)
