@@ -47,6 +47,25 @@ let storedSettings: StoredSettings = {
 let embyClient: EmbyClient | null = null
 let activePlayback: ActivePlayback | null = null
 const imageCache = new Map<string, string>()
+const IMAGE_CACHE_LIMIT = 120
+
+function readCachedImage(key: string): string | undefined {
+  const cached = imageCache.get(key)
+  if (!cached) return undefined
+  imageCache.delete(key)
+  imageCache.set(key, cached)
+  return cached
+}
+
+function writeCachedImage(key: string, value: string): void {
+  imageCache.delete(key)
+  imageCache.set(key, value)
+  while (imageCache.size > IMAGE_CACHE_LIMIT) {
+    const oldestKey = imageCache.keys().next().value as string | undefined
+    if (!oldestKey) break
+    imageCache.delete(oldestKey)
+  }
+}
 
 function readSettings(): void {
   if (!settingsPath || !existsSync(settingsPath)) return
@@ -339,10 +358,10 @@ function registerIpc(): void {
   ipcMain.handle('emby:get-image', async (_event, request: { itemId: string; imageType?: string; tag?: string; maxWidth?: number }) => {
     const client = getClient()
     const key = JSON.stringify(request)
-    const cached = imageCache.get(key)
+    const cached = readCachedImage(key)
     if (cached) return cached
     const image = await client.getImage(request.itemId, request.imageType || 'Primary', request.tag, request.maxWidth || 480)
-    imageCache.set(key, image)
+    writeCachedImage(key, image)
     return image
   })
   ipcMain.handle('mpv:play', (_event, request: PlayRequest) => launchMpv(request))

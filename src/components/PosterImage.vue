@@ -44,7 +44,7 @@ watch(() => [props.item.Id, props.variant, props.item.ImageTags?.Primary, props.
 
 <template>
   <div class="poster-image" :class="[`poster-image--${variant}`, { 'is-loading': loading }]">
-    <img v-if="imageUrl" :src="imageUrl" :alt="item.Name" @load="loading = false" />
+    <img v-if="imageUrl" :src="imageUrl" :alt="item.Name" @load="loading = false" @error="imageUrl = ''; loading = false" />
     <div v-else class="poster-placeholder">
       <ImageOff v-if="!loading" :size="variant === 'backdrop' ? 32 : 24" stroke-width="1.4" />
       <Film v-else :size="variant === 'backdrop' ? 32 : 24" stroke-width="1.4" />
