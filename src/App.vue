@@ -49,8 +49,12 @@ const episodeItems = ref<EmbyItem[]>([])
 const selectedAudio = ref<number | undefined>()
 const selectedSubtitle = ref<number | undefined>()
 const isLoading = ref(false)
+const homeLoading = ref(false)
+const libraryLoading = ref(false)
 const isDetailLoading = ref(false)
 const errorMessage = ref('')
+const homeError = ref('')
+const libraryError = ref('')
 const notice = ref<{ message: string; kind: 'success' | 'error' } | null>(null)
 const currentPlaybackId = ref('')
 const currentPlaybackPosition = ref(0)
@@ -58,6 +62,8 @@ const searchInput = ref<HTMLInputElement | null>(null)
 let searchTimer: ReturnType<typeof setTimeout> | undefined
 let noticeTimer: ReturnType<typeof setTimeout> | undefined
 let removeMpvListener: (() => void) | undefined
+let homeRequestId = 0
+let libraryRequestId = 0
 
 const form = reactive({
   serverUrl: 'http://127.0.0.1:8096',
@@ -80,8 +86,7 @@ const continueItems = computed(() => {
   return [...unique.values()].slice(0, 12)
 })
 const displayItems = computed(() => {
-  if (activeFilter.value === 'all') return libraryItems.value
-  return libraryItems.value.filter((item) => item.Type === activeFilter.value)
+  return libraryItems.value
 })
 const selectedSource = computed(() => playbackInfo.value?.MediaSources?.[0])
 const mediaStreams = computed<MediaStream[]>(() => {
@@ -132,13 +137,31 @@ function applySettings(next: PublicSettings): void {
   form.mpvPath = next.mpvPath || 'mpv.exe'
 }
 
+function viewSupportsFilter(view: EmbyView, filter: LibraryFilter): boolean {
+  if (filter === 'all' || !view.CollectionType) return true
+  const collectionType = view.CollectionType.toLowerCase()
+  if (collectionType === 'mixed') return true
+  if (filter === 'Movie') return collectionType === 'movies' || collectionType === 'movie'
+  return collectionType === 'tvshows' || collectionType === 'tv' || collectionType === 'series'
+}
+
+function preferredViewId(filter: LibraryFilter): string {
+  if (activeView.value && viewSupportsFilter(activeView.value, filter)) return activeView.value.Id
+  return views.value.find((view) => viewSupportsFilter(view, filter))?.Id || views.value[0]?.Id || ''
+}
+
 async function loadHome(): Promise<void> {
   if (!isConnected.value) return
-  isLoading.value = true
-  errorMessage.value = ''
+  const requestId = ++homeRequestId
+  homeLoading.value = true
+  homeError.value = ''
   try {
-    views.value = await window.emby.getViews()
-    if (!activeViewId.value && views.value[0]) activeViewId.value = views.value[0].Id
+    const nextViews = await window.emby.getViews()
+    if (requestId !== homeRequestId) return
+    views.value = nextViews
+    if (!views.value.some((view) => view.Id === activeViewId.value)) {
+      activeViewId.value = views.value[0]?.Id || ''
+    }
     const [latest, library] = await Promise.all([
       window.emby.getItems({
         recursive: true,
@@ -147,29 +170,33 @@ async function loadHome(): Promise<void> {
         sortOrder: 'Descending',
         limit: 24,
       }),
-      activeView.value
-        ? window.emby.getItems({
-          parentId: activeView.value.Id,
-          recursive: true,
-          includeItemTypes: 'Movie,Series',
-          sortBy: 'SortName',
-          limit: 60,
-        })
-        : Promise.resolve({ Items: [], TotalRecordCount: 0, StartIndex: 0 }),
+      window.emby.getItems({
+        parentId: activeViewId.value || undefined,
+        recursive: true,
+        includeItemTypes: 'Movie,Series',
+        sortBy: 'SortName',
+        limit: 60,
+      }),
     ])
+    if (requestId !== homeRequestId) return
     latestItems.value = latest.Items
     libraryItems.value = library.Items
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '加载 Emby 内容失败'
+    if (requestId === homeRequestId) {
+      homeError.value = error instanceof Error ? error.message : '加载 Emby 内容失败'
+    }
   } finally {
-    isLoading.value = false
+    if (requestId === homeRequestId) homeLoading.value = false
   }
 }
 
-async function loadLibrary(viewId = activeViewId.value): Promise<void> {
-  if (!isConnected.value || !viewId) return
-  activeViewId.value = viewId
-  isLoading.value = true
+async function loadLibrary(viewId = activeViewId.value, filter = activeFilter.value): Promise<void> {
+  if (!isConnected.value) return
+  const resolvedViewId = viewId || preferredViewId(filter)
+  const requestId = ++libraryRequestId
+  activeViewId.value = resolvedViewId
+  libraryLoading.value = true
+  libraryError.value = ''
   try {
     const items: EmbyItem[] = []
     let startIndex = 0
@@ -177,9 +204,9 @@ async function loadLibrary(viewId = activeViewId.value): Promise<void> {
     let pageCount = 0
     while (startIndex < totalRecordCount && pageCount < 200) {
       const result = await window.emby.getItems({
-        parentId: viewId,
+        parentId: resolvedViewId || undefined,
         recursive: true,
-        includeItemTypes: 'Movie,Series',
+        includeItemTypes: filter === 'all' ? 'Movie,Series' : filter,
         sortBy: 'SortName',
         startIndex,
         limit: 100,
@@ -190,23 +217,26 @@ async function loadLibrary(viewId = activeViewId.value): Promise<void> {
       startIndex += result.Items.length
       pageCount += 1
     }
+    if (requestId !== libraryRequestId) return
     libraryItems.value = items
   } catch (error) {
-    showNotice(error instanceof Error ? error.message : '加载媒体库失败', 'error')
+    if (requestId === libraryRequestId) {
+      libraryError.value = error instanceof Error ? error.message : '加载媒体库失败'
+    }
   } finally {
-    isLoading.value = false
+    if (requestId === libraryRequestId) libraryLoading.value = false
   }
 }
 
 function goHome(): void {
   activePage.value = 'home'
-  if (!latestItems.value.length) void loadHome()
+  if ((!latestItems.value.length && !libraryItems.value.length) || homeError.value) void loadHome()
 }
 
 function goLibrary(filter: LibraryFilter): void {
   activePage.value = 'library'
   activeFilter.value = filter
-  if (!libraryItems.value.length) void loadLibrary()
+  void loadLibrary(preferredViewId(filter), filter)
 }
 
 function openSettings(): void {
@@ -348,6 +378,7 @@ async function openDetails(item: EmbyItem): Promise<void> {
     }
   } catch (error) {
     showNotice(error instanceof Error ? error.message : '读取媒体详情失败', 'error')
+  } finally {
     isDetailLoading.value = false
   }
 }
@@ -403,12 +434,17 @@ function handleMpvStatus(status: MpvStatus): void {
 
 onMounted(async () => {
   window.addEventListener('keydown', handleKeydown)
-  const saved = await window.emby.getSettings()
-  applySettings(saved)
-  removeMpvListener = window.emby.onMpvStatus(handleMpvStatus)
-  if (saved.connected) {
-    await loadHome()
-  } else {
+  try {
+    const saved = await window.emby.getSettings()
+    applySettings(saved)
+    removeMpvListener = window.emby.onMpvStatus(handleMpvStatus)
+    if (saved.connected) {
+      await loadHome()
+    } else {
+      activePage.value = 'settings'
+    }
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '读取本地设置失败'
     activePage.value = 'settings'
   }
 })
@@ -529,8 +565,9 @@ onUnmounted(() => {
           <div class="hero-scroll-hint"><span>SCROLL TO EXPLORE</span><ChevronRight :size="16" /></div>
         </section>
 
-        <div v-if="errorMessage" class="error-banner"><AlertCircle :size="18" />{{ errorMessage }}<button class="text-button" type="button" @click="loadHome">重试</button></div>
-        <div v-if="isLoading && !heroItem" class="loading-state"><LoaderCircle class="spin" :size="24" />正在加载媒体库</div>
+        <div v-if="homeError" class="error-banner"><AlertCircle :size="18" />{{ homeError }}<button class="text-button" type="button" @click="loadHome">重试</button></div>
+        <div v-if="homeLoading && !heroItem" class="loading-state"><LoaderCircle class="spin" :size="24" />正在加载媒体库</div>
+        <div v-else-if="!homeLoading && !homeError && !heroItem" class="empty-state home-empty-state"><Clapperboard :size="32" /><h3>还没有可展示的内容</h3><p>请确认 Emby 媒体库已完成扫描，并检查当前账号权限。</p><button class="button button--ghost" type="button" @click="loadHome"><RefreshCw :size="16" />重新加载</button></div>
 
         <section v-if="continueItems.length" class="content-section">
           <div class="section-heading"><div><p class="eyebrow">PICK UP WHERE YOU LEFT OFF</p><h2>继续观看</h2></div><button class="text-button" type="button" @click="goLibrary('all')">查看全部<ChevronRight :size="16" /></button></div>
@@ -573,7 +610,8 @@ onUnmounted(() => {
             <button class="icon-button" type="button" title="刷新媒体库" @click="loadLibrary()"><RefreshCw :size="17" /></button>
           </div>
         </div>
-        <div v-if="isLoading" class="loading-state"><LoaderCircle class="spin" :size="24" />正在加载媒体库</div>
+        <div v-if="libraryError" class="error-banner"><AlertCircle :size="18" />{{ libraryError }}<button class="text-button" type="button" @click="loadLibrary()">重试</button></div>
+        <div v-if="libraryLoading" class="loading-state"><LoaderCircle class="spin" :size="24" />正在加载媒体库</div>
         <div v-else-if="displayItems.length" class="poster-grid">
           <button v-for="item in displayItems" :key="item.Id" class="poster-card" type="button" @click="openDetails(item)">
             <PosterImage :item="item" />
@@ -581,7 +619,7 @@ onUnmounted(() => {
             <span class="poster-info"><strong>{{ item.Name }}</strong><small>{{ item.ProductionYear || itemTypeLabel(item) }}</small></span>
           </button>
         </div>
-        <div v-else class="empty-state"><Clapperboard :size="32" /><h3>这里还没有内容</h3><p>请检查媒体库权限或刷新连接。</p></div>
+        <div v-else class="empty-state"><Clapperboard :size="32" /><h3>这里还没有内容</h3><p>请检查媒体库权限或刷新连接。</p><button class="button button--ghost" type="button" @click="loadLibrary()"><RefreshCw :size="16" />重新加载</button></div>
       </section>
     </main>
 

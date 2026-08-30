@@ -1,4 +1,14 @@
 import { Buffer } from 'node:buffer'
+import type {
+  EmbyItem,
+  EmbyView,
+  ItemResult,
+  MediaSourceInfo,
+  PlaybackInfo,
+  QueryResult,
+} from '../src/types'
+
+export type { MediaSourceInfo, PlaybackInfo } from '../src/types'
 
 const CLIENT_HEADER = 'MediaBrowser Client="Ember Player", Device="Windows", DeviceId="ember-player", Version="0.1.0"'
 
@@ -10,44 +20,19 @@ export interface AuthResponse {
   }
 }
 
-export interface EmbyItem {
-  Id: string
-  Name: string
-  Type: string
-  Overview?: string
-  ProductionYear?: number
-  PremiereDate?: string
-  RunTimeTicks?: number
-  ChildCount?: number
-  IndexNumber?: number
-  ParentIndexNumber?: number
-  SeriesName?: string
-  SeriesId?: string
-  ImageTags?: Record<string, string>
-  BackdropImageTags?: string[]
-  UserData?: Record<string, unknown>
-  MediaStreams?: Record<string, unknown>[]
-  Genres?: string[]
-  OfficialRating?: string
-  CommunityRating?: number
-}
-
-export interface MediaSourceInfo {
-  Id: string
-  Name?: string
-  Container?: string
-  SupportsDirectPlay?: boolean
-  SupportsDirectStream?: boolean
-  DirectStreamUrl?: string
-  TranscodingUrl?: string
-  AddApiKeyToDirectStreamUrl?: boolean
-  RequiredHttpHeaders?: Record<string, string>
-  MediaStreams?: Record<string, unknown>[]
-}
-
-export interface PlaybackInfo {
-  MediaSources?: MediaSourceInfo[]
-  PlaySessionId?: string
+function parseQueryResult<T>(value: unknown, endpoint: string): QueryResult<T> {
+  if (!value || typeof value !== 'object') {
+    throw new Error(`Emby 接口 ${endpoint} 返回格式无效`)
+  }
+  const result = value as Partial<QueryResult<T>>
+  if (!Array.isArray(result.Items) || typeof result.TotalRecordCount !== 'number') {
+    throw new Error(`Emby 接口 ${endpoint} 缺少 Items 或 TotalRecordCount`)
+  }
+  return {
+    Items: result.Items,
+    TotalRecordCount: result.TotalRecordCount,
+    StartIndex: typeof result.StartIndex === 'number' ? result.StartIndex : undefined,
+  }
 }
 
 export function normalizeServerUrl(rawUrl: string): string {
@@ -126,8 +111,12 @@ export class EmbyClient {
     return { mimeType: contentType, data: buffer.toString('base64') }
   }
 
-  async getViews(): Promise<EmbyItem[]> {
-    return this.request<EmbyItem[]>(`/Users/${encodeURIComponent(this.userId)}/Views`)
+  async getViews(): Promise<EmbyView[]> {
+    const result = parseQueryResult<EmbyView>(
+      await this.request(`/Users/${encodeURIComponent(this.userId)}/Views`),
+      '/Users/{UserId}/Views',
+    )
+    return result.Items
   }
 
   async getItems(options: {
@@ -140,7 +129,7 @@ export class EmbyClient {
     startIndex?: number
     limit?: number
     isResumable?: boolean
-  } = {}): Promise<{ Items: EmbyItem[]; TotalRecordCount: number; StartIndex: number }> {
+  } = {}): Promise<ItemResult> {
     const params = new URLSearchParams({
       UserId: this.userId,
       IncludeItemTypes: options.includeItemTypes || 'Movie,Series',
@@ -157,7 +146,10 @@ export class EmbyClient {
     if (options.parentId) params.set('ParentId', options.parentId)
     if (options.searchTerm) params.set('SearchTerm', options.searchTerm)
     if (options.isResumable) params.set('IsResumable', 'true')
-    return this.request(`/Users/${encodeURIComponent(this.userId)}/Items?${params.toString()}`)
+    return parseQueryResult<EmbyItem>(
+      await this.request(`/Users/${encodeURIComponent(this.userId)}/Items?${params.toString()}`),
+      '/Users/{UserId}/Items',
+    ) as ItemResult
   }
 
   async getItem(itemId: string): Promise<EmbyItem> {

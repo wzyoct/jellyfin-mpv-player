@@ -48,11 +48,13 @@ export interface EmbyView {
   ImageTags?: Record<string, string>
 }
 
-export interface ItemResult {
-  Items: EmbyItem[]
+export interface QueryResult<T> {
+  Items: T[]
   TotalRecordCount: number
-  StartIndex: number
+  StartIndex?: number
 }
+
+export type ItemResult = QueryResult<EmbyItem>
 
 export interface MediaSourceInfo {
   Id: string
