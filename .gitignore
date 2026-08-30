@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Build and packaging output
+dist/
+dist-electron/
+release/
+coverage/
+.vite/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.local
+
+# Runtime and diagnostic output
+*.log
+logs/
+*.pid
+*.tsbuildinfo
+
+# Editors and operating systems
+.idea/
+.vscode/
+*.suo
+*.user
+.DS_Store
+Thumbs.db
+desktop.ini
