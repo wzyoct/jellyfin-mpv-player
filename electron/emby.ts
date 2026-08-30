@@ -10,7 +10,7 @@ import type {
 
 export type { MediaSourceInfo, PlaybackInfo } from '../src/types'
 
-const CLIENT_HEADER = 'MediaBrowser Client="Ember Player", Device="Windows", DeviceId="ember-player", Version="0.1.0"'
+const CLIENT_HEADER = 'MediaBrowser Client="Ember Player", Device="Windows", DeviceId="ember-player", Version="0.2.0"'
 
 export interface AuthResponse {
   AccessToken: string
