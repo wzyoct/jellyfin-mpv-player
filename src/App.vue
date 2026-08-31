@@ -7,6 +7,7 @@ import {
   CircleUserRound,
   Clapperboard,
   Film,
+  History,
   House,
   LoaderCircle,
   LogIn,
@@ -23,6 +24,8 @@ import {
 import PosterImage from './components/PosterImage.vue'
 import MediaCard from './components/MediaCard.vue'
 import MediaRail from './components/MediaRail.vue'
+import packageInfo from '../package.json'
+import releaseNotesData from './data/release-notes.json'
 import { chooseDefaultSubtitle, isExternalSubtitle, isChineseSubtitle } from './subtitlePreference'
 import type {
   EmbyItem,
@@ -32,10 +35,15 @@ import type {
   PlaybackInfo,
   PublicSettings,
   ItemsQuery,
+  ReleaseNote,
 } from './types'
 
-type Page = 'home' | 'library' | 'settings'
+type Page = 'home' | 'library' | 'settings' | 'updates'
 type LibraryFilter = 'all' | 'Movie' | 'Series'
+
+const appVersion = packageInfo.version
+const releaseNotes = releaseNotesData as ReleaseNote[]
+const currentRelease = computed(() => releaseNotes.find((release) => release.version === appVersion) || releaseNotes[0])
 
 const settings = ref<PublicSettings | null>(null)
 const appBooted = ref(false)
@@ -330,6 +338,10 @@ function openSettings(): void {
   activePage.value = 'settings'
 }
 
+function openUpdates(): void {
+  activePage.value = 'updates'
+}
+
 async function submitConnection(): Promise<void> {
   errorMessage.value = ''
   if (isConnected.value && !form.password.trim()) {
@@ -591,6 +603,10 @@ onUnmounted(() => {
           <Tv :size="16" />
           <span>剧集</span>
         </button>
+        <button class="nav-item" :class="{ active: activePage === 'updates' }" type="button" @click="openUpdates">
+          <History :size="16" />
+          <span>更新</span>
+        </button>
       </nav>
 
       <div class="topbar-actions">
@@ -660,6 +676,46 @@ onUnmounted(() => {
               </button>
             </div>
           </form>
+        </div>
+      </section>
+
+      <section v-else-if="activePage === 'updates'" class="updates-page">
+        <div class="updates-heading">
+          <div>
+            <p class="eyebrow">RELEASE NOTES</p>
+            <h1>更新记录</h1>
+            <p>按版本查看 Ember Player 的功能、优化与修复。</p>
+          </div>
+          <div class="current-version">
+            <span>当前版本</span>
+            <strong>v{{ appVersion }}</strong>
+            <small>{{ currentRelease.date }}</small>
+          </div>
+        </div>
+
+        <div class="release-timeline">
+          <article
+            v-for="release in releaseNotes"
+            :key="release.version"
+            class="release-entry"
+            :class="{ 'release-entry--current': release.version === appVersion }"
+          >
+            <span class="release-marker" aria-hidden="true"></span>
+            <div class="release-content">
+              <div class="release-meta">
+                <h2>v{{ release.version }}</h2>
+                <time :datetime="release.date">{{ release.date }}</time>
+                <span v-if="release.version === appVersion" class="release-tag">当前版本</span>
+              </div>
+              <p v-if="release.summary" class="release-summary">{{ release.summary }}</p>
+              <div v-for="section in release.sections" :key="section.title" class="release-section">
+                <h3>{{ section.title }}</h3>
+                <ul>
+                  <li v-for="item in section.items" :key="item">{{ item }}</li>
+                </ul>
+              </div>
+            </div>
+          </article>
         </div>
       </section>
 
