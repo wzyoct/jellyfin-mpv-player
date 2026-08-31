@@ -35,6 +35,7 @@ type Page = 'home' | 'library' | 'settings'
 type LibraryFilter = 'all' | 'Movie' | 'Series'
 
 const settings = ref<PublicSettings | null>(null)
+const appBooted = ref(false)
 const activePage = ref<Page>('home')
 const activeFilter = ref<LibraryFilter>('all')
 const views = ref<EmbyView[]>([])
@@ -442,11 +443,13 @@ onMounted(async () => {
   if (!window.emby) {
     errorMessage.value = '请通过 Ember Player 桌面应用启动此页面'
     activePage.value = 'settings'
+    appBooted.value = true
     return
   }
   try {
     const saved = await window.emby.getSettings()
     applySettings(saved)
+    appBooted.value = true
     removeMpvListener = window.emby.onMpvStatus(handleMpvStatus)
     if (saved.connected) {
       await loadHome()
@@ -456,6 +459,7 @@ onMounted(async () => {
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : '读取本地设置失败'
     activePage.value = 'settings'
+    appBooted.value = true
   }
 })
 
@@ -468,7 +472,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="app-shell" :class="{ 'app-shell--standalone': !isConnected }">
+  <div class="app-shell" :class="{ 'app-shell--standalone': !isConnected && appBooted, 'app-shell--booting': !appBooted }">
     <header v-if="isConnected" class="topbar">
       <button class="brand" type="button" aria-label="返回首页" @click="goHome">
         <span class="brand-mark">E</span>
@@ -505,8 +509,14 @@ onUnmounted(() => {
       </div>
     </header>
 
-    <main class="page-content" :class="{ 'page-content--standalone': !isConnected }">
-      <section v-if="!isConnected || activePage === 'settings'" class="settings-page">
+    <main class="page-content" :class="{ 'page-content--standalone': !isConnected && appBooted }">
+      <section v-if="!appBooted" class="boot-screen" aria-busy="true" aria-live="polite">
+        <span class="brand-mark">E</span>
+        <LoaderCircle class="spin" :size="22" />
+        <span>正在准备 Ember Player</span>
+      </section>
+
+      <section v-else-if="!isConnected || activePage === 'settings'" class="settings-page">
         <div v-if="!isConnected" class="standalone-intro">
           <div class="brand standalone-brand">
             <span class="brand-mark">E</span>

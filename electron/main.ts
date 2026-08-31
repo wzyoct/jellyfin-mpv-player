@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, safeStorage } from 'electron'
+import { app, BrowserWindow, ipcMain, Menu, safeStorage } from 'electron'
 import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
@@ -376,13 +376,25 @@ function createWindow(): void {
     minHeight: 680,
     backgroundColor: '#090a0c',
     show: false,
+    titleBarStyle: 'hidden',
+    titleBarOverlay: {
+      color: '#0f141a',
+      symbolColor: '#f1f4f6',
+      height: 64,
+    },
     webPreferences: {
       preload: join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
     },
   })
-  mainWindow.once('ready-to-show', () => mainWindow?.show())
+  const showWindow = () => {
+    if (!mainWindow || mainWindow.isDestroyed() || mainWindow.isVisible()) return
+    mainWindow.show()
+    mainWindow.focus()
+  }
+  mainWindow.webContents.once('did-finish-load', showWindow)
+  mainWindow.once('ready-to-show', showWindow)
   if (!app.isPackaged) {
     void mainWindow.loadURL('http://127.0.0.1:5173')
   } else {
@@ -394,6 +406,7 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
+  Menu.setApplicationMenu(null)
   settingsPath = join(app.getPath('userData'), 'settings.json')
   readSettings()
   restoreClient()

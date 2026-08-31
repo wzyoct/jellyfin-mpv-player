@@ -1,7 +1,5 @@
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
-
 :root {
-  font-family: 'DM Sans', 'Microsoft YaHei', sans-serif;
+  font-family: 'Segoe UI', 'Microsoft YaHei UI', 'Microsoft YaHei', sans-serif;
   color: #f1f4f6;
   background: #0f141a;
   --bg: #0f141a;
@@ -44,6 +42,8 @@ kbd { padding: 2px 5px; border: 1px solid #414249; border-radius: 4px; color: #7
 .avatar-button { border-color: var(--line); border-radius: 50%; }
 .page-content { min-height: 100vh; padding: 0 48px 80px; }
 .page-content--standalone { display: flex; align-items: center; justify-content: center; padding-top: 30px; }
+.boot-screen { display: flex; align-items: center; justify-content: center; gap: 12px; min-height: 100vh; color: #9da4aa; font-size: 13px; }
+.boot-screen .brand-mark { width: 34px; height: 34px; }
 .hero-section { position: relative; min-height: 620px; max-width: 1500px; margin: 0 auto 8px; overflow: hidden; background: #121a22; }
 .hero-section > .poster-image { position: absolute; inset: 0 0 0 30%; opacity: .92; }
 .hero-section .poster-image img { object-position: center 24%; }
