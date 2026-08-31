@@ -2,7 +2,7 @@
 
 ## 用户只需要点击什么
 
-每次正式打包后，打开 `release/当前版本-Ember Player <版本号>` 文件夹。
+每次正式打包后，打开项目根目录下的 `release/` 文件夹，当前版本的安装包就在这里。
 
 普通用户双击：
 
@@ -21,17 +21,15 @@
 ```text
 release/
 ├─ 00-先看这里-启动说明.txt
-├─ 当前版本-Ember Player <版本号>/
-│  ├─ 00-启动说明.txt
-│  ├─ 01-双击安装（推荐）-Ember Player Setup-<版本号>.exe
-│  ├─ 02-免安装绿色版-Ember Player-<版本号>.zip
-│  ├─ 更新记录.txt
-│  └─ 文件校验值-SHA256.txt
+├─ 01-双击安装（推荐）-Ember Player Setup-<版本号>.exe
+├─ 02-免安装绿色版-Ember Player-<版本号>.zip
+├─ 03-更新记录.txt
+├─ 04-文件校验值-SHA256.txt
 ├─ 历史版本/
 └─ 构建内部文件/
 ```
 
-`历史版本` 保存旧版安装包，`构建内部文件` 保存 `blockmap`、`latest.yml`、`win-unpacked` 等调试或自动更新材料。普通用户不需要打开这两个目录。
+打开 `release/` 就能看到当前版本的 EXE 和 ZIP。`历史版本` 保存旧版安装包，`构建内部文件` 保存 `blockmap`、`latest.yml`、`win-unpacked` 等调试或自动更新材料。普通用户不需要打开这两个目录。
 
 ## 打包命令
 

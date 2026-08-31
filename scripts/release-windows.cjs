@@ -9,7 +9,7 @@ const packageInfo = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 
 const releaseNotes = JSON.parse(fs.readFileSync(path.join(root, 'src/data/release-notes.json'), 'utf8'))
 const version = packageInfo.version
 const releaseDate = releaseNotes.find((release) => release.version === version)?.date || new Date().toISOString().slice(0, 10)
-const currentDirectory = path.join(releaseRoot, `当前版本-Ember Player ${version}`)
+const currentDirectory = releaseRoot
 const historyDirectory = path.join(releaseRoot, '历史版本')
 const internalDirectory = path.join(releaseRoot, '构建内部文件')
 const rawDirectory = path.join(releaseRoot, 'build')
@@ -53,32 +53,54 @@ function moveEntry(source, destinationDirectory) {
   fs.renameSync(source, destination)
 }
 
+function detectVersion(source, entryName) {
+  const nameMatch = entryName.match(/\d+\.\d+\.\d+/)
+  if (nameMatch) return nameMatch[0]
+  if (!fs.statSync(source).isFile()) return undefined
+
+  try {
+    const content = fs.readFileSync(source, 'utf8')
+    return content.match(/v(\d+\.\d+\.\d+)/)?.[1]
+  } catch {
+    return undefined
+  }
+}
+
 function archiveExistingOutput() {
   ensureDirectory(historyDirectory)
   ensureDirectory(internalDirectory)
 
-  if (fs.existsSync(currentDirectory)) {
-    throw new Error(`当前版本目录已存在，请先确认并处理：${currentDirectory}`)
-  }
-
   for (const entry of fs.readdirSync(releaseRoot, { withFileTypes: true })) {
     const source = path.join(releaseRoot, entry.name)
-    if (entry.name === '历史版本' || entry.name === '构建内部文件' || entry.name === '00-先看这里-启动说明.txt' || entry.name === `当前版本-Ember Player ${version}`) continue
+    if (entry.name === '历史版本' || entry.name === '构建内部文件') continue
 
-    const versionMatch = entry.name.match(/\d+\.\d+\.\d+/)
     const isKnownBuilderOutput = entry.name === 'build'
       || entry.name === 'win-unpacked'
       || entry.name === 'builder-debug.yml'
       || entry.name === 'latest.yml'
       || entry.name.startsWith('当前版本-Ember Player')
       || entry.name.startsWith('Ember Player')
-    if (!isKnownBuilderOutput) {
+    const isKnownReleaseFile = entry.name === '00-先看这里-启动说明.txt'
+      || entry.name === '03-更新记录.txt'
+      || entry.name === '04-文件校验值-SHA256.txt'
+      || /^01-.*Setup-\d+\.\d+\.\d+\.exe$/.test(entry.name)
+      || /^02-.*-\d+\.\d+\.\d+\.zip$/.test(entry.name)
+    if (!isKnownBuilderOutput && !isKnownReleaseFile) {
       console.warn(`保留未识别的 release 文件：${entry.name}`)
       continue
     }
 
-    if (versionMatch) moveEntry(source, path.join(historyDirectory, versionMatch[0]))
-    else moveEntry(source, path.join(internalDirectory, '历史构建'))
+    const entryVersion = detectVersion(source, entry.name)
+    if (entryVersion === version && isKnownReleaseFile) continue
+    if (entry.isDirectory() && entry.name.startsWith('当前版本-Ember Player')) {
+      const destination = path.join(historyDirectory, entryVersion || '未标记版本')
+      ensureDirectory(path.dirname(destination))
+      fs.renameSync(source, uniqueDirectory(path.dirname(destination), path.basename(destination)))
+    } else if (entryVersion && isKnownReleaseFile) {
+      moveEntry(source, path.join(historyDirectory, entryVersion))
+    } else {
+      moveEntry(source, path.join(internalDirectory, '历史构建'))
+    }
   }
 }
 
@@ -107,7 +129,7 @@ Ember Player Windows 启动说明
 发布日期：${releaseDate}
 
 推荐启动方式：
-1. 打开“当前版本-Ember Player ${version}”文件夹。
+1. 打开本文件所在的 release 文件夹。
 2. 双击“01-双击安装（推荐）-Ember Player Setup-${version}.exe”。
 3. 安装完成后，从桌面或开始菜单双击 Ember Player 启动。
 
@@ -119,17 +141,7 @@ Ember Player Windows 启动说明
 不要打开 .blockmap、.yml、win-unpacked 或构建内部文件。
 播放媒体前，请在 Ember Player 设置中确认 MPV 路径有效。
 `)
-  writeTextFile(path.join(currentDirectory, '00-启动说明.txt'), `
-Ember Player v${version}
-
-普通用户请双击：
-01-双击安装（推荐）-Ember Player Setup-${version}.exe
-
-如果不想安装，请解压：
-02-免安装绿色版-Ember Player-${version}.zip
-然后双击解压目录中的 Ember Player.exe。
-`)
-  writeTextFile(path.join(currentDirectory, '更新记录.txt'), formatReleaseNotes(release))
+  writeTextFile(path.join(currentDirectory, '03-更新记录.txt'), formatReleaseNotes(release))
 }
 
 function writeChecksums(files) {
@@ -138,7 +150,7 @@ function writeChecksums(files) {
     const hash = crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')
     lines.push(`${hash}  ${path.basename(file)}`)
   }
-  writeTextFile(path.join(currentDirectory, '文件校验值-SHA256.txt'), lines.join('\n'))
+  writeTextFile(path.join(currentDirectory, '04-文件校验值-SHA256.txt'), lines.join('\n'))
 }
 
 run(npmCommand, ['run', 'release:check'])

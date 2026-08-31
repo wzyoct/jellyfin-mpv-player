@@ -1,6 +1,6 @@
 {
   "name": "ember-player",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "A focused Emby desktop client powered by MPV.",
   "productName": "Ember Player",
   "main": "dist-electron/electron/main.js",
