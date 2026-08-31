@@ -641,7 +641,7 @@ function handlePlaybackSnapshot(snapshot: PlaybackSnapshot): void {
   if (snapshot.phase === 'error' && snapshot.message) showNotice(snapshot.message, 'error')
 }
 
-async function refreshPlaybackData(snapshot: PlaybackSnapshot): Promise<void> {
+async function refreshPlaybackData(snapshot: PlaybackSnapshot, notifyOnFailure = true): Promise<void> {
   const itemId = snapshot.currentItemId || snapshot.queue[snapshot.currentIndex]?.itemId
   if (!itemId || !isConnected.value) return
   let lastItem: EmbyItem | undefined
@@ -669,12 +669,14 @@ async function refreshPlaybackData(snapshot: PlaybackSnapshot): Promise<void> {
       // The final attempt reports through the visible notice below.
     }
   }
-  if (!confirmed) showNotice('播放结束，但媒体状态暂未同步，请稍后刷新', 'error')
+  if (!confirmed && notifyOnFailure) showNotice('播放结束，但媒体状态暂未同步，请稍后刷新', 'error')
 }
 
 function handlePlaybackChanged(event: PlaybackEvent): void {
   handlePlaybackSnapshot(event)
-  if (event.type === 'item-finalized' || event.phase === 'stopped') void refreshPlaybackData(event)
+  if (event.type === 'item-finalized') void refreshPlaybackData(event, false)
+  if (event.phase === 'stopping') void refreshPlaybackData(event, false)
+  if (event.phase === 'stopped') void refreshPlaybackData(event)
 }
 
 async function togglePlaybackPause(): Promise<void> {

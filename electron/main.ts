@@ -400,6 +400,7 @@ async function finishSession(session: PlaybackSession, reason: string, terminate
   session.finalizePromise = (async () => {
     session.phase = 'stopping'
     session.endReason = reason
+    emitPlayback('snapshot', session)
     clearInterval(session.progressTimer)
     try {
       await finalizeEntry(session, reason, false)
