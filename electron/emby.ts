@@ -6,6 +6,7 @@ import type {
   MediaSourceInfo,
   PlaybackInfo,
   QueryResult,
+  RecommendationDto,
 } from '../src/types'
 
 export type { MediaSourceInfo, PlaybackInfo } from '../src/types'
@@ -129,6 +130,7 @@ export class EmbyClient {
     startIndex?: number
     limit?: number
     isResumable?: boolean
+    filters?: string
   } = {}): Promise<ItemResult> {
     const params = new URLSearchParams({
       UserId: this.userId,
@@ -145,11 +147,28 @@ export class EmbyClient {
     })
     if (options.parentId) params.set('ParentId', options.parentId)
     if (options.searchTerm) params.set('SearchTerm', options.searchTerm)
-    if (options.isResumable) params.set('IsResumable', 'true')
+    if (options.filters) params.set('Filters', options.filters)
+    if (options.isResumable) params.set('Filters', 'IsResumable')
     return parseQueryResult<EmbyItem>(
       await this.request(`/Users/${encodeURIComponent(this.userId)}/Items?${params.toString()}`),
       '/Users/{UserId}/Items',
     ) as ItemResult
+  }
+
+  async getMovieRecommendations(): Promise<RecommendationDto[]> {
+    const params = new URLSearchParams({
+      UserId: this.userId,
+      CategoryLimit: '2',
+      ItemLimit: '8',
+      EnableImages: 'true',
+      EnableUserData: 'true',
+      ImageTypeLimit: '1',
+    })
+    const value = await this.request(`/Movies/Recommendations?${params.toString()}`)
+    if (!Array.isArray(value)) {
+      throw new Error('Emby 接口 /Movies/Recommendations 返回格式无效')
+    }
+    return value as RecommendationDto[]
   }
 
   async getItem(itemId: string): Promise<EmbyItem> {

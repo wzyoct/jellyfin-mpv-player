@@ -356,6 +356,7 @@ function registerIpc(): void {
   })
   ipcMain.handle('emby:get-views', () => getClient().getViews())
   ipcMain.handle('emby:get-items', (_event, query) => getClient().getItems(query || {}))
+  ipcMain.handle('emby:get-movie-recommendations', () => getClient().getMovieRecommendations())
   ipcMain.handle('emby:get-item', (_event, itemId: string) => getClient().getItem(itemId))
   ipcMain.handle('emby:get-playback-info', (_event, itemId: string) => getClient().getPlaybackInfo(itemId))
   ipcMain.handle('emby:get-image', async (_event, request: { itemId: string; imageType?: string; tag?: string; maxWidth?: number }) => {

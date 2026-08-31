@@ -14,6 +14,7 @@ const api: EmberApi = {
   logout: () => ipcRenderer.invoke('emby:logout'),
   getViews: () => ipcRenderer.invoke('emby:get-views'),
   getItems: (query?: ItemsQuery) => ipcRenderer.invoke('emby:get-items', query),
+  getMovieRecommendations: () => ipcRenderer.invoke('emby:get-movie-recommendations'),
   getItem: (itemId: string) => ipcRenderer.invoke('emby:get-item', itemId),
   getPlaybackInfo: (itemId: string) => ipcRenderer.invoke('emby:get-playback-info', itemId),
   getImage: (request: ImageRequest) => ipcRenderer.invoke('emby:get-image', request),

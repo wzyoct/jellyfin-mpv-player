@@ -61,6 +61,13 @@ export interface QueryResult<T> {
 
 export type ItemResult = QueryResult<EmbyItem>
 
+export interface RecommendationDto {
+  Items: EmbyItem[]
+  RecommendationType?: string
+  BaselineItemName?: string
+  CategoryId?: number
+}
+
 export interface MediaSourceInfo {
   Id: string
   Name?: string
@@ -112,6 +119,7 @@ export interface ItemsQuery {
   startIndex?: number
   limit?: number
   isResumable?: boolean
+  filters?: string
 }
 
 export interface ImageRequest {
@@ -144,6 +152,7 @@ export interface EmberApi {
   logout(): Promise<PublicSettings>
   getViews(): Promise<EmbyView[]>
   getItems(query?: ItemsQuery): Promise<ItemResult>
+  getMovieRecommendations(): Promise<RecommendationDto[]>
   getItem(itemId: string): Promise<EmbyItem>
   getPlaybackInfo(itemId: string): Promise<PlaybackInfo>
   getImage(request: ImageRequest): Promise<string>

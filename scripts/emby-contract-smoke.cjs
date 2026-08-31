@@ -34,6 +34,21 @@ async function run() {
   assert.equal(query.get('ParentId'), 'view-1')
   assert.equal(query.get('IncludeItemTypes'), 'Movie')
 
+  responseBody = [{
+    Items: [{ Id: 'recommendation-1', Name: '推荐电影', Type: 'Movie' }],
+    RecommendationType: 'SimilarToRecentlyPlayed',
+  }]
+  const recommendations = await client.getMovieRecommendations()
+  assert.deepEqual(recommendations, responseBody)
+  assert.match(lastUrl, /\/emby\/Movies\/Recommendations\?/)
+
+  responseBody = {
+    Items: [{ Id: 'resume-1', Name: '续播电影', Type: 'Movie' }],
+    TotalRecordCount: 1,
+  }
+  await client.getItems({ includeItemTypes: 'Movie,Episode', filters: 'IsResumable', sortBy: 'DatePlayed' })
+  assert.equal(new URL(lastUrl).searchParams.get('Filters'), 'IsResumable')
+
   responseBody = { Items: [] }
   await assert.rejects(() => client.getViews(), /缺少 Items 或 TotalRecordCount/)
   console.log('Emby contract smoke test passed')
