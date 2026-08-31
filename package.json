@@ -1,6 +1,6 @@
 {
   "name": "ember-player",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "A focused Emby desktop client powered by MPV.",
   "productName": "Ember Player",
   "main": "dist-electron/electron/main.js",
@@ -52,7 +52,7 @@
         "nsis",
         "zip"
       ],
-      "signAndEditExecutable": true
+      "signAndEditExecutable": false
     },
     "nsis": {
       "oneClick": true,
