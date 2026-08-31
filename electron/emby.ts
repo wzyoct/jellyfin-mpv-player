@@ -1,4 +1,5 @@
 import { Buffer } from 'node:buffer'
+import packageInfo from '../package.json'
 import type {
   EmbyItem,
   EmbyView,
@@ -11,7 +12,7 @@ import type {
 
 export type { MediaSourceInfo, PlaybackInfo } from '../src/types'
 
-const CLIENT_HEADER = 'MediaBrowser Client="Ember Player", Device="Windows", DeviceId="ember-player", Version="0.3.0"'
+const CLIENT_HEADER = `MediaBrowser Client="Ember Player", Device="Windows", DeviceId="ember-player", Version="${packageInfo.version}"`
 
 export interface AuthResponse {
   AccessToken: string

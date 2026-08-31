@@ -68,6 +68,18 @@ export interface RecommendationDto {
   CategoryId?: number
 }
 
+export interface ReleaseNoteSection {
+  title: string
+  items: string[]
+}
+
+export interface ReleaseNote {
+  version: string
+  date: string
+  summary?: string
+  sections: ReleaseNoteSection[]
+}
+
 export interface MediaSourceInfo {
   Id: string
   Name?: string
