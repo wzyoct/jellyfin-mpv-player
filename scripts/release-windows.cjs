@@ -154,7 +154,7 @@ function copyRuntime() {
 }
 
 run(npmCommand, ['run', 'release:check'])
-run(npmCommand, ['run', 'test:subtitle'])
+run(npmCommand, ['test'])
 run(npmCommand, ['run', 'test:contract'])
 run(npmCommand, ['run', 'build'])
 

@@ -1,6 +1,6 @@
 {
   "name": "ember-player",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "description": "A focused Emby desktop client powered by MPV.",
   "productName": "Ember Player",
   "main": "dist-electron/electron/main.js",
@@ -12,7 +12,7 @@
     "build:renderer": "vite build",
     "build:electron": "tsc -p electron/tsconfig.json",
     "test:contract": "npm run build:electron && node scripts/emby-contract-smoke.cjs",
-    "test:subtitle": "vitest run src/subtitlePreference.test.ts",
+    "test": "vitest run",
     "typecheck": "vue-tsc --noEmit && tsc -p electron/tsconfig.json --noEmit",
     "release:check": "node scripts/check-version.cjs",
     "release:notes": "node scripts/sync-release-notes.cjs",
