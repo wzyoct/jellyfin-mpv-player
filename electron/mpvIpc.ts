@@ -1,4 +1,5 @@
 import net from 'node:net'
+import { logger } from './logger'
 
 export interface MpvIpcMessage {
   request_id?: number
@@ -35,9 +36,29 @@ export function consumeJsonLines(buffer: string, chunk: string): ParsedJsonLines
 }
 
 interface PendingRequest {
+  command: unknown[]
   resolve: (value: unknown) => void
   reject: (error: Error) => void
   timer: NodeJS.Timeout
+}
+
+const mpvErrorMessages: Record<string, string> = {
+  'invalid parameter': '参数无效',
+  'command not found': '命令不存在',
+  'property unavailable': '属性不可用',
+}
+
+function translateMpvError(error: string): string {
+  return mpvErrorMessages[error.toLowerCase()] || error
+}
+
+function commandContext(command: unknown[]): Record<string, unknown> {
+  const name = typeof command[0] === 'string' ? command[0] : 'unknown'
+  const context: Record<string, unknown> = { command: name }
+  if (name === 'set_property' || name === 'get_property' || name === 'observe_property') {
+    context.property = typeof command[1] === 'string' ? command[1] : 'unknown'
+  }
+  return context
 }
 
 export class MpvIpc {
@@ -83,6 +104,7 @@ export class MpvIpc {
         await new Promise((resolve) => setTimeout(resolve, 120))
       }
     }
+    logger.error('mpv-ipc', 'connect-failed', lastError)
     throw lastError
   }
 
@@ -93,16 +115,26 @@ export class MpvIpc {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(requestId)
-        reject(new Error(`MPV IPC 请求超时（${String(command[0])}）`))
+        const error = new Error(`MPV IPC 请求超时（${String(command[0])}）`)
+        logger.error('mpv-ipc', 'request-timeout', error, commandContext(command))
+        reject(error)
       }, timeoutMs)
-      this.pending.set(requestId, { resolve, reject, timer })
+      this.pending.set(requestId, { command, resolve, reject, timer })
+      if (command[0] !== 'get_property' && command[0] !== 'observe_property') {
+        logger.info('mpv-ipc', 'command-sent', commandContext(command))
+      }
       socket.write(`${JSON.stringify({ command, request_id: requestId })}\n`, (error) => {
         if (!error) return
         clearTimeout(timer)
         this.pending.delete(requestId)
+        logger.error('mpv-ipc', 'write-failed', error, commandContext(command))
         reject(error)
       })
     })
+  }
+
+  async setProperty(name: string, value: unknown, timeoutMs = 1600): Promise<unknown> {
+    return this.send(['set_property', name, value], timeoutMs)
   }
 
   async getProperty(name: string, timeoutMs = 800): Promise<unknown> {
@@ -165,7 +197,14 @@ export class MpvIpc {
       if (!pending) return
       clearTimeout(pending.timer)
       this.pending.delete(message.request_id)
-      if (message.error && message.error !== 'success') pending.reject(new Error(`MPV IPC：${message.error}`))
+      if (message.error && message.error !== 'success') {
+        const command = String(pending.command[0])
+        const property = commandContext(pending.command).property
+        const propertyLabel = typeof property === 'string' ? ` ${property}` : ''
+        const error = new Error(`MPV IPC 命令 ${command}${propertyLabel} 失败：${translateMpvError(message.error)}`)
+        logger.error('mpv-ipc', 'command-failed', error, { ...commandContext(pending.command), mpvError: message.error })
+        pending.reject(error)
+      }
       else pending.resolve(message.data)
       return
     }

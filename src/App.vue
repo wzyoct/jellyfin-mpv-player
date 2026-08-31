@@ -7,8 +7,10 @@ import {
   CircleUserRound,
   Clapperboard,
   Film,
+  FolderOpen,
   History,
   House,
+  Info,
   LoaderCircle,
   LogIn,
   LogOut,
@@ -498,6 +500,15 @@ async function validateMpv(test = false): Promise<void> {
   }
 }
 
+async function openLogDirectory(): Promise<void> {
+  try {
+    await window.emby.openLogDirectory()
+    showNotice('日志目录已打开')
+  } catch (error) {
+    showNotice(error instanceof Error ? error.message : '无法打开日志目录', 'error')
+  }
+}
+
 async function performSearch(): Promise<void> {
   const term = searchTerm.value.trim()
   const requestId = ++searchRequestId
@@ -872,6 +883,7 @@ onUnmounted(() => {
             <div class="mpv-tools">
               <button class="button button--ghost" type="button" @click="validateMpv()"><Check :size="16" />验证路径</button>
               <button class="button button--ghost" type="button" @click="validateMpv(true)"><Play :size="16" />测试启动</button>
+              <button class="button button--ghost" type="button" @click="openLogDirectory"><FolderOpen :size="16" />打开日志目录</button>
               <span v-if="mpvValidation" class="mpv-status" :class="{ 'mpv-status--error': !mpvValidation.valid }">{{ mpvValidation.message }}<small v-if="mpvValidation.version">{{ mpvValidation.version }}</small></span>
             </div>
             <div v-if="errorMessage" class="inline-error"><AlertCircle :size="16" />{{ errorMessage }}</div>
@@ -973,10 +985,12 @@ onUnmounted(() => {
                     <span v-if="heroItem.RunTimeTicks">{{ formatRuntime(heroItem.RunTimeTicks) }}</span>
                   </div>
                   <p class="hero-description">{{ heroItem.Overview || '打开详情，查看完整介绍与播放选项。' }}</p>
-                  <button class="button button--primary button--large" type="button" @click="playItemDirect(heroItem)">
-                    <Play :size="19" fill="currentColor" />{{ resumePosition(heroItem) ? '继续播放' : '播放' }}
-                  </button>
-                  <button class="button button--ghost button--large" type="button" @click="openDetails(heroItem)">查看详情</button>
+                  <div class="hero-actions">
+                    <button class="button button--primary button--large" type="button" @click="playItemDirect(heroItem)">
+                      <Play :size="19" fill="currentColor" />{{ resumePosition(heroItem) ? '继续播放' : '播放' }}
+                    </button>
+                    <button class="button button--ghost button--large" type="button" @click="openDetails(heroItem)"><Info :size="18" />查看详情</button>
+                  </div>
                 </div>
               </Transition>
             </div>

@@ -245,6 +245,7 @@ export interface EmberApi {
   getImage(request: ImageRequest): Promise<string>
   validateMpvPath(path?: string): Promise<MpvValidationResult>
   testMpvPath(path?: string): Promise<MpvValidationResult>
+  openLogDirectory(): Promise<void>
   playbackStart(request: StartPlaybackRequest): Promise<PlaybackSnapshot>
   playbackCommand(request: PlaybackCommand): Promise<PlaybackSnapshot>
   getPlaybackSnapshot(): Promise<PlaybackSnapshot>

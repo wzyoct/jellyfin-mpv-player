@@ -70,11 +70,12 @@ kbd { padding: 2px 5px; border: 1px solid #414249; border-radius: 4px; color: #7
 .hero-meta span + span, .detail-meta span + span { position: relative; }
 .hero-meta span + span::before, .detail-meta span + span::before { position: absolute; top: 50%; left: -11px; width: 3px; height: 3px; border-radius: 50%; background: #65666b; content: ''; }
 .hero-description { max-width: 475px; margin: 0 0 27px; color: #bbbcc1; font-size: 14px; line-height: 1.75; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.hero-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
 .button { display: inline-flex; align-items: center; justify-content: center; gap: 9px; min-height: 38px; padding: 0 17px; border: 1px solid transparent; border-radius: 7px; font-size: 13px; font-weight: 600; transition: transform .18s, background .18s, border-color .18s; }
 .button:hover { transform: translateY(-1px); }
 .button--primary { background: var(--accent); color: #fff; box-shadow: 0 9px 26px rgba(227,102,82,.2); }
 .button--primary:hover { background: var(--accent-strong); }
-.button--large { min-height: 46px; padding: 0 21px; }
+.button--large { height: 46px; min-height: 46px; padding: 0 21px; }
 .button--ghost { border-color: rgba(255,255,255,.14); color: #d8d8db; background: rgba(255,255,255,.04); }
 .button--ghost:hover { background: rgba(255,255,255,.1); }
 .hero-controls { position: absolute; z-index: 2; right: var(--page-gutter); bottom: 42px; display: flex; align-items: center; gap: 10px; }

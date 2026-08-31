@@ -1,10 +1,12 @@
-import { app, BrowserWindow, ipcMain, Menu, safeStorage } from 'electron'
+import { app, BrowserWindow, ipcMain, Menu, safeStorage, shell } from 'electron'
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { EmbyClient, normalizeServerUrl, type MediaSourceInfo, type PlaybackInfo } from './emby'
 import { MpvIpc, type MpvIpcMessage } from './mpvIpc'
+import { buildMpvHttpHeaders } from './mpvHeaders'
+import { logger } from './logger'
 import { buildEpisodeQueue } from '../src/playbackQueue'
 import { chooseDefaultSubtitle } from '../src/subtitlePreference'
 import { isResumePositionReached, resolveResumeTicks, shouldAdvanceAfterEnd } from './playbackLogic'
@@ -126,6 +128,7 @@ function readSettings(): void {
     persistSettings()
   } catch {
     // A corrupted settings file should not prevent the app from opening.
+    logger.warn('settings', 'read-failed', { settingsPath })
   }
 }
 
@@ -182,8 +185,9 @@ function restoreClient(): void {
   if (token && storedSettings.userId) {
     try {
       embyClient = new EmbyClient(storedSettings.serverUrl, token, storedSettings.userId, storedSettings.deviceId)
-    } catch {
+    } catch (error) {
       embyClient = null
+      logger.error('emby', 'restore-client-failed', error)
     }
   }
 }
@@ -191,17 +195,6 @@ function restoreClient(): void {
 function getClient(): EmbyClient {
   if (!embyClient) throw new Error('请先连接 Emby 服务器')
   return embyClient
-}
-
-function formatHeaderFields(source: MediaSourceInfo, token: string): string {
-  const headers: Record<string, string> = {
-    ...(source.RequiredHttpHeaders || {}),
-    'X-MediaBrowser-Token': token,
-  }
-  return Object.entries(headers)
-    .filter(([, value]) => value !== undefined && value !== null)
-    .map(([key, value]) => `${key}: ${value}`)
-    .join(',')
 }
 
 function queueItem(item: EmbyItem): PlaybackQueueItem {
@@ -376,6 +369,7 @@ async function readLatestMpvState(session: PlaybackSession): Promise<void> {
 async function finalizeEntry(session: PlaybackSession, reason: string, keepProcess: boolean): Promise<void> {
   const entry = session.currentEntry
   if (!entry || entry.finalized) return
+  logger.info('playback', 'finalize-entry', { sessionId: session.sessionId, itemId: entry.itemId, reason, keepProcess })
   await readLatestMpvState(session)
   session.endReason = reason
   if (reason === 'eof' && entry.durationSeconds !== undefined) {
@@ -436,6 +430,7 @@ function buildStreamUrl(session: PlaybackSession, entry: PlaybackEntry): string 
 async function seekEntry(session: PlaybackSession, entry: PlaybackEntry, startTimeTicks: number): Promise<void> {
   const targetSeconds = Math.max(0, startTimeTicks / 10_000_000)
   if (!targetSeconds) return
+  logger.info('playback', 'seek-start', { sessionId: session.sessionId, itemId: entry.itemId, targetSeconds: Math.round(targetSeconds) })
   await session.ipc.send(['seek', targetSeconds, 'absolute+exact'])
   const deadline = Date.now() + 5000
   let latestPosition: unknown
@@ -445,6 +440,7 @@ async function seekEntry(session: PlaybackSession, entry: PlaybackEntry, startTi
       entry.positionSeconds = latestPosition
       entry.positionObserved = true
       entry.positionFresh = true
+      logger.info('playback', 'seek-complete', { sessionId: session.sessionId, itemId: entry.itemId, actualSeconds: Math.round(latestPosition) })
       return
     }
     await new Promise((resolve) => setTimeout(resolve, 120))
@@ -460,15 +456,16 @@ async function loadEntry(session: PlaybackSession, index: number, startTimeTicks
     ? { ...cachedEntry, positionSeconds: Math.max(0, startTimeTicks / 10_000_000), positionFresh: false, positionObserved: false, isPaused: false }
     : await prepareEntry(session, item, startTimeTicks)
   session.entries.set(index, entry)
+  logger.info('playback', 'load-entry', { sessionId: session.sessionId, itemId: entry.itemId, index, resume: startTimeTicks > 0 })
   session.phase = 'switching'
   session.loadingNext = true
   session.transitioning = true
   try {
-    await session.ipc.send(['set', 'pause', true])
+    await session.ipc.setProperty('pause', true)
     const loaded = session.ipc.waitForEvent(
       (message) => message.event === 'file-loaded' || message.event === 'end-file' || message.event === 'ipc-closed',
     )
-    await session.ipc.send(['set', 'http-header-fields', formatHeaderFields(entry.source, getClient().token)])
+    await session.ipc.setProperty('http-header-fields', buildMpvHttpHeaders(entry.source, getClient().token))
     await session.ipc.send(['loadfile', buildStreamUrl(session, entry), 'replace'])
     const loadEvent = await loaded
     if (loadEvent.event !== 'file-loaded') {
@@ -486,7 +483,7 @@ async function loadEntry(session: PlaybackSession, index: number, startTimeTicks
       }
     }
     entry.isPaused = false
-    await session.ipc.send(['set', 'pause', false])
+    await session.ipc.setProperty('pause', false)
     const client = embyClient
     if (client) {
       try {
@@ -497,6 +494,7 @@ async function loadEntry(session: PlaybackSession, index: number, startTimeTicks
       }
     }
     session.phase = 'playing'
+    logger.info('playback', 'playing', { sessionId: session.sessionId, itemId: entry.itemId, index })
     emitPlayback('snapshot', session)
   } finally {
     session.loadingNext = false
@@ -530,6 +528,7 @@ async function handleEndFile(session: PlaybackSession, message: MpvIpcMessage): 
 
 async function attachMpvIpc(session: PlaybackSession): Promise<void> {
   await session.ipc.connectWithRetry()
+  logger.info('mpv', 'ipc-connected', { sessionId: session.sessionId })
   session.ipc.onEvent((message) => {
     if (message.event === 'property-change' && session.currentEntry) {
       const entry = session.currentEntry
@@ -605,17 +604,31 @@ async function startPlayback(request: StartPlaybackRequest): Promise<PlaybackSna
     '--force-window=immediate',
     '--resume-playback=no',
     '--title=Ember Player',
+    '--msg-level=all=warn',
     `--input-ipc-server=${pipeName}`,
-    `--http-header-fields=${formatHeaderFields(firstEntry.source, client.token)}`,
   ]
-  const child = spawn(storedSettings.mpvPath || 'mpv.exe', args, { windowsHide: false, stdio: 'ignore' })
+  logger.info('playback', 'start', { sessionId: session.sessionId, queueLength: session.queue.length, resume: resumeTicks > 0 })
+  const child = spawn(storedSettings.mpvPath || 'mpv.exe', args, { windowsHide: false, stdio: ['ignore', 'ignore', 'pipe'] })
   session.process = child
   activeSession = session
   session.progressTimer = setInterval(() => void reportActiveProgress(), 10_000)
+  let stderrBuffer = ''
+  child.stderr?.setEncoding('utf8')
+  child.stderr?.on('data', (chunk: string | Buffer) => {
+    stderrBuffer += chunk.toString()
+    const lines = stderrBuffer.split(/\r?\n/)
+    stderrBuffer = lines.pop() || ''
+    for (const line of lines) {
+      if (line.trim()) logger.warn('mpv', 'stderr', { sessionId: session.sessionId, message: line })
+    }
+  })
   child.once('error', (error) => {
+    logger.error('mpv', 'process-error', error, { sessionId: session.sessionId })
     void finishSession(session, 'error', true).finally(() => emitPlayback('error', session, `无法启动 MPV：${error.message}`))
   })
   child.once('close', (code) => {
+    if (stderrBuffer.trim()) logger.warn('mpv', 'stderr', { sessionId: session.sessionId, message: stderrBuffer })
+    logger.info('mpv', 'process-closed', { sessionId: session.sessionId, code })
     if (!session.stopped && !session.finalizePromise) void finishSession(session, code === 0 ? 'quit' : 'error', false)
   })
   try {
@@ -638,7 +651,7 @@ async function playbackCommand(request: PlaybackCommand): Promise<PlaybackSnapsh
       session.stopAfterCurrent = !session.stopAfterCurrent
       emitPlayback('snapshot', session)
     } else if (request.command === 'pause' || request.command === 'resume') {
-      await session.ipc.send(['set', 'pause', request.command === 'pause'])
+      await session.ipc.setProperty('pause', request.command === 'pause')
     } else if (request.command === 'next' || request.command === 'previous') {
       const nextIndex = request.command === 'next' ? session.currentIndex + 1 : session.currentIndex - 1
       if (nextIndex >= 0 && nextIndex < session.queue.length) {
@@ -664,7 +677,39 @@ async function playbackCommand(request: PlaybackCommand): Promise<PlaybackSnapsh
   return lastSnapshot
 }
 
+function rendererDiagnosticPayload(payload: unknown): { kind: string; message: string; stack?: string } {
+  if (!payload || typeof payload !== 'object') return { kind: 'unknown', message: String(payload) }
+  const value = payload as Record<string, unknown>
+  return {
+    kind: typeof value.kind === 'string' ? value.kind.slice(0, 80) : 'unknown',
+    message: typeof value.message === 'string' ? value.message.slice(0, 2000) : '未知渲染错误',
+    stack: typeof value.stack === 'string' ? value.stack.slice(0, 4000) : undefined,
+  }
+}
+
+function registerProcessDiagnostics(): void {
+  process.on('uncaughtExceptionMonitor', (error, origin) => {
+    logger.error('process', 'uncaught-exception', error, { origin })
+  })
+  process.on('unhandledRejection', (reason) => {
+    logger.error('process', 'unhandled-rejection', reason)
+  })
+}
+
 function registerIpc(): void {
+  ipcMain.on('diagnostics:renderer-error', (_event, payload: unknown) => {
+    const diagnostic = rendererDiagnosticPayload(payload)
+    logger.error('renderer', diagnostic.kind, new Error(diagnostic.message), diagnostic.stack ? { stack: diagnostic.stack } : undefined)
+  })
+  ipcMain.handle('diagnostics:open-log-directory', async () => {
+    const directory = logger.getDirectory()
+    if (!directory) throw new Error('日志目录尚未准备好')
+    const error = await shell.openPath(directory)
+    if (error) {
+      logger.error('diagnostics', 'open-log-directory-failed', new Error(error))
+      throw new Error('无法打开日志目录')
+    }
+  })
   ipcMain.handle('settings:get', () => publicSettings())
   ipcMain.handle('settings:save', (_event, input: { serverUrl: string; username: string; mpvPath: string }) => {
     const nextUrl = normalizeServerUrl(input.serverUrl)
@@ -722,7 +767,14 @@ function registerIpc(): void {
     const result = testMpvPath(mpvPath)
     return { valid: Boolean(result.version), ...result }
   })
-  ipcMain.handle('playback:start', (_event, request: StartPlaybackRequest) => startPlayback(request))
+  ipcMain.handle('playback:start', async (_event, request: StartPlaybackRequest) => {
+    try {
+      return await startPlayback(request)
+    } catch (error) {
+      logger.error('playback', 'start-failed', error, { itemId: request.itemId })
+      throw error
+    }
+  })
   ipcMain.handle('playback:command', (_event, request: PlaybackCommand) => playbackCommand(request))
   ipcMain.handle('playback:snapshot', () => snapshotFor(activeSession))
 }
@@ -754,6 +806,12 @@ function createWindow(): void {
   }
   mainWindow.webContents.once('did-finish-load', showWindow)
   mainWindow.once('ready-to-show', showWindow)
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    logger.error('window', 'load-failed', new Error(errorDescription), { errorCode, validatedURL, isMainFrame })
+  })
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    logger.error('window', 'render-process-gone', new Error(details.reason), { exitCode: details.exitCode })
+  })
   if (!app.isPackaged) {
     void mainWindow.loadURL('http://127.0.0.1:5173')
   } else {
@@ -785,6 +843,15 @@ if (!hasSingleInstanceLock) {
   app.whenReady().then(() => {
     Menu.setApplicationMenu(null)
     settingsPath = join(app.getPath('userData'), 'settings.json')
+    logger.initialize(join(app.getPath('userData'), 'logs'))
+    logger.info('app', 'started', {
+      version: app.getVersion(),
+      platform: process.platform,
+      arch: process.arch,
+      electron: process.versions.electron,
+      node: process.versions.node,
+    })
+    registerProcessDiagnostics()
     readSettings()
     restoreClient()
     registerIpc()
@@ -800,7 +867,9 @@ if (!hasSingleInstanceLock) {
 
   let quitting = false
   app.on('before-quit', (event) => {
-    if (quitting || !activeSession) return
+    if (quitting) return
+    logger.info('app', 'quit-requested')
+    if (!activeSession) return
     event.preventDefault()
     quitting = true
     void stopActivePlayback().finally(() => app.quit())

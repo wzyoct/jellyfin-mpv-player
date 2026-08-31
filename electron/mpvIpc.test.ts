@@ -60,4 +60,64 @@ describe('consumeJsonLines', () => {
       await new Promise<void>((resolve) => server.close(() => resolve()))
     }
   })
+
+  it('sends native boolean properties through set_property', async () => {
+    const pipeName = `\\\\.\\pipe\\ember-property-${randomUUID()}`
+    const received: unknown[][] = []
+    const server = net.createServer((socket) => {
+      let buffer = ''
+      socket.on('data', (chunk) => {
+        buffer += chunk.toString()
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+        for (const line of lines) {
+          if (!line.trim()) continue
+          const request = JSON.parse(line) as { command?: unknown[]; request_id?: number }
+          if (request.command) received.push(request.command)
+          socket.write(JSON.stringify({ request_id: request.request_id, error: 'success' }) + '\n')
+        }
+      })
+    })
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(pipeName, resolve)
+    })
+
+    const ipc = new MpvIpc(pipeName)
+    try {
+      await ipc.connectWithRetry()
+      await ipc.setProperty('pause', true)
+      await ipc.setProperty('http-header-fields', ['X-Required: yes', 'X-MediaBrowser-Token: secret'])
+      expect(received).toEqual([
+        ['set_property', 'pause', true],
+        ['set_property', 'http-header-fields', ['X-Required: yes', 'X-MediaBrowser-Token: secret']],
+      ])
+    } finally {
+      ipc.close()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  })
+
+  it('keeps MPV errors contextual while translating common messages', async () => {
+    const pipeName = `\\\\.\\pipe\\ember-property-error-${randomUUID()}`
+    const server = net.createServer((socket) => {
+      socket.on('data', (chunk) => {
+        const request = JSON.parse(chunk.toString()) as { request_id?: number }
+        socket.write(JSON.stringify({ request_id: request.request_id, error: 'invalid parameter' }) + '\n')
+      })
+    })
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(pipeName, resolve)
+    })
+
+    const ipc = new MpvIpc(pipeName)
+    try {
+      await ipc.connectWithRetry()
+      await expect(ipc.setProperty('pause', true)).rejects.toThrow('MPV IPC 命令 set_property pause 失败：参数无效')
+    } finally {
+      ipc.close()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
+  })
 })

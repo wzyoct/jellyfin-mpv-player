@@ -1,5 +1,6 @@
 import { Buffer } from 'node:buffer'
 import packageInfo from '../package.json'
+import { logger } from './logger'
 import type {
   EmbyItem,
   EmbyView,
@@ -83,6 +84,10 @@ export class EmbyClient {
   }
 
   async request<T>(path: string, init: RequestInit = {}): Promise<T> {
+    const method = init.method || 'GET'
+    const endpoint = path.split('?')[0]
+    const startedAt = Date.now()
+    logger.info('emby', 'request-start', { method, endpoint })
     const headers = new Headers(init.headers)
     headers.set('Accept', 'application/json')
     headers.set('X-Emby-Authorization', this.clientHeader())
@@ -95,21 +100,36 @@ export class EmbyClient {
     let response: Response
     try {
       response = await fetch(this.resolveUrl(path), { ...init, headers, signal: init.signal || controller.signal })
+    } catch (error) {
+      logger.error('emby', 'request-failed', error, { method, endpoint, durationMs: Date.now() - startedAt })
+      throw error
     } finally {
       clearTimeout(timer)
     }
     if (!response.ok) {
       const body = await response.text().catch(() => '')
+      logger.warn('emby', 'request-failed', { method, endpoint, status: response.status, durationMs: Date.now() - startedAt })
       throw new Error(`Emby 请求失败（${response.status}）：${body.slice(0, 180) || response.statusText}`)
     }
 
     if (response.status === 204) {
+      logger.info('emby', 'request-complete', { method, endpoint, status: response.status, durationMs: Date.now() - startedAt })
       return undefined as T
     }
-    return response.json() as Promise<T>
+    try {
+      const result = await response.json() as T
+      logger.info('emby', 'request-complete', { method, endpoint, status: response.status, durationMs: Date.now() - startedAt })
+      return result
+    } catch (error) {
+      logger.error('emby', 'response-parse-failed', error, { method, endpoint, status: response.status, durationMs: Date.now() - startedAt })
+      throw error
+    }
   }
 
   async requestBinary(path: string): Promise<{ mimeType: string; data: string }> {
+    const endpoint = path.split('?')[0]
+    const startedAt = Date.now()
+    logger.info('emby', 'binary-request-start', { method: 'GET', endpoint })
     const headers = new Headers()
     headers.set('X-Emby-Authorization', this.clientHeader())
     if (this.token) {
@@ -120,15 +140,25 @@ export class EmbyClient {
     let response: Response
     try {
       response = await fetch(this.resolveUrl(path), { headers, signal: controller.signal })
+    } catch (error) {
+      logger.error('emby', 'binary-request-failed', error, { endpoint, durationMs: Date.now() - startedAt })
+      throw error
     } finally {
       clearTimeout(timer)
     }
     if (!response.ok) {
+      logger.warn('emby', 'binary-request-failed', { endpoint, status: response.status, durationMs: Date.now() - startedAt })
       throw new Error(`图片请求失败（${response.status}）`)
     }
     const contentType = response.headers.get('content-type') || 'image/jpeg'
-    const buffer = Buffer.from(await response.arrayBuffer())
-    return { mimeType: contentType, data: buffer.toString('base64') }
+    try {
+      const buffer = Buffer.from(await response.arrayBuffer())
+      logger.info('emby', 'binary-request-complete', { endpoint, status: response.status, durationMs: Date.now() - startedAt })
+      return { mimeType: contentType, data: buffer.toString('base64') }
+    } catch (error) {
+      logger.error('emby', 'binary-response-read-failed', error, { endpoint, status: response.status, durationMs: Date.now() - startedAt })
+      throw error
+    }
   }
 
   async getViews(): Promise<EmbyView[]> {
