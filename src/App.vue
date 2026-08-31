@@ -115,6 +115,9 @@ const activeView = computed(() => views.value.find((view) => view.Id === activeV
 const heroItems = computed(() => recommendationItems.value.length ? recommendationItems.value : latestItems.value.slice(0, 8))
 const heroIndex = ref(0)
 const heroItem = computed(() => heroItems.value[heroIndex.value] || heroItems.value[0])
+const heroDisplayedItem = ref<EmbyItem>()
+const heroOutgoingItem = ref<EmbyItem>()
+const heroLoadedId = ref('')
 const heroLabel = computed(() => recommendationItems.value.length ? '电影推荐' : '最近加入')
 const displayItems = computed(() => {
   return libraryItems.value
@@ -218,6 +221,46 @@ function uniqueItems(items: EmbyItem[]): EmbyItem[] {
 function stopHeroAutoPlay(): void {
   if (heroTimer) clearInterval(heroTimer)
   heroTimer = undefined
+}
+
+let heroTransitionTimer: ReturnType<typeof setTimeout> | undefined
+
+watch(heroItem, (next) => {
+  if (!next) {
+    heroDisplayedItem.value = undefined
+    heroOutgoingItem.value = undefined
+    heroLoadedId.value = ''
+    return
+  }
+  if (!heroDisplayedItem.value) {
+    heroDisplayedItem.value = next
+    heroLoadedId.value = ''
+    return
+  }
+  if (heroDisplayedItem.value.Id === next.Id) return
+  heroOutgoingItem.value = heroDisplayedItem.value
+  heroDisplayedItem.value = next
+  heroLoadedId.value = ''
+  if (heroTransitionTimer) clearTimeout(heroTransitionTimer)
+}, { immediate: true })
+
+function finishHeroTransition(): void {
+  if (!heroDisplayedItem.value) return
+  heroLoadedId.value = heroDisplayedItem.value.Id
+  if (heroTransitionTimer) clearTimeout(heroTransitionTimer)
+  heroTransitionTimer = setTimeout(() => {
+    heroOutgoingItem.value = undefined
+  }, 620)
+}
+
+function handleHeroImageLoaded(itemId: string): void {
+  if (heroDisplayedItem.value?.Id !== itemId) return
+  finishHeroTransition()
+}
+
+function handleHeroImageFailed(itemId: string): void {
+  if (heroDisplayedItem.value?.Id !== itemId) return
+  finishHeroTransition()
 }
 
 function startHeroAutoPlay(): void {
@@ -740,6 +783,7 @@ onUnmounted(() => {
   if (searchTimer) clearTimeout(searchTimer)
   if (noticeTimer) clearTimeout(noticeTimer)
   stopHeroAutoPlay()
+  if (heroTransitionTimer) clearTimeout(heroTransitionTimer)
   if (focusRefreshTimer) clearTimeout(focusRefreshTimer)
   removePlaybackListener?.()
 })
@@ -887,33 +931,55 @@ onUnmounted(() => {
       </section>
 
       <template v-else-if="activePage === 'home'">
-        <section
-          v-if="heroItem"
-          class="hero-section"
-          @mouseenter="setHeroPaused(true)"
-          @mouseleave="setHeroPaused(false)"
-          @focusin="setHeroPaused(true)"
-          @focusout="setHeroPaused(false)"
-        >
-           <Transition name="hero-fade" mode="out-in">
-             <PosterImage :key="heroItem.Id" :item="heroItem" variant="backdrop" eager />
-           </Transition>
-          <div class="hero-overlay"></div>
-          <div class="hero-content">
-            <p class="eyebrow">{{ heroLabel }}</p>
-            <h1>{{ heroItem.Name }}</h1>
-            <div class="hero-meta">
-              <span v-if="heroItem.ProductionYear">{{ heroItem.ProductionYear }}</span>
-              <span v-if="heroItem.OfficialRating">{{ heroItem.OfficialRating }}</span>
-              <span>{{ itemTypeLabel(heroItem) }}</span>
-              <span v-if="heroItem.RunTimeTicks">{{ formatRuntime(heroItem.RunTimeTicks) }}</span>
+          <section
+            v-if="heroItem"
+            class="hero-section"
+            @mouseenter="setHeroPaused(true)"
+            @mouseleave="setHeroPaused(false)"
+            @focusin="setHeroPaused(true)"
+            @focusout="setHeroPaused(false)"
+          >
+            <div class="hero-backdrops" aria-hidden="true">
+              <PosterImage
+                v-if="heroOutgoingItem"
+                :key="`outgoing-${heroOutgoingItem.Id}`"
+                :item="heroOutgoingItem"
+                class="hero-layer hero-layer--outgoing"
+                variant="backdrop"
+                eager
+              />
+              <PosterImage
+                v-if="heroDisplayedItem"
+                :key="`displayed-${heroDisplayedItem.Id}`"
+                :item="heroDisplayedItem"
+                class="hero-layer"
+                :class="{ 'hero-layer--visible': heroLoadedId === heroDisplayedItem.Id }"
+                variant="backdrop"
+                eager
+                @loaded="handleHeroImageLoaded(heroDisplayedItem.Id)"
+                @failed="handleHeroImageFailed(heroDisplayedItem.Id)"
+              />
             </div>
-            <p class="hero-description">{{ heroItem.Overview || '打开详情，查看完整介绍与播放选项。' }}</p>
-            <button class="button button--primary button--large" type="button" @click="playItemDirect(heroItem)">
-              <Play :size="19" fill="currentColor" />{{ resumePosition(heroItem) ? '继续播放' : '播放' }}
-            </button>
-            <button class="button button--ghost button--large" type="button" @click="openDetails(heroItem)">查看详情</button>
-          </div>
+            <div class="hero-overlay"></div>
+            <div class="hero-content">
+              <Transition name="hero-copy" mode="out-in">
+                <div :key="heroItem.Id" class="hero-copy">
+                  <p class="eyebrow">{{ heroLabel }}</p>
+                  <h1>{{ heroItem.Name }}</h1>
+                  <div class="hero-meta">
+                    <span v-if="heroItem.ProductionYear">{{ heroItem.ProductionYear }}</span>
+                    <span v-if="heroItem.OfficialRating">{{ heroItem.OfficialRating }}</span>
+                    <span>{{ itemTypeLabel(heroItem) }}</span>
+                    <span v-if="heroItem.RunTimeTicks">{{ formatRuntime(heroItem.RunTimeTicks) }}</span>
+                  </div>
+                  <p class="hero-description">{{ heroItem.Overview || '打开详情，查看完整介绍与播放选项。' }}</p>
+                  <button class="button button--primary button--large" type="button" @click="playItemDirect(heroItem)">
+                    <Play :size="19" fill="currentColor" />{{ resumePosition(heroItem) ? '继续播放' : '播放' }}
+                  </button>
+                  <button class="button button--ghost button--large" type="button" @click="openDetails(heroItem)">查看详情</button>
+                </div>
+              </Transition>
+            </div>
           <div v-if="heroItems.length > 1" class="hero-controls" role="group" aria-label="推荐轮播控制">
             <button class="hero-arrow" type="button" title="上一部推荐" aria-label="上一部推荐" @click="showPreviousHero"><ChevronRight :size="18" class="hero-arrow--previous" /></button>
             <div class="hero-dots" role="tablist" aria-label="选择推荐内容">
@@ -1002,19 +1068,19 @@ onUnmounted(() => {
 
     <Transition name="modal" appear>
       <div v-if="selectedItem" class="modal-backdrop" @click.self="closeDetails">
-        <section class="detail-modal" role="dialog" aria-modal="true" :aria-label="selectedItem.Name">
+        <section class="detail-modal" role="dialog" aria-modal="true" :aria-label="mediaPresentation(selectedItem).ariaLabel">
           <button class="modal-close icon-button" type="button" title="关闭详情" @click="closeDetails"><X :size="20" /></button>
           <Transition name="detail-content" mode="out-in">
             <div :key="selectedItem.Id">
               <div class="detail-art"><PosterImage :item="selectedItem" variant="backdrop" eager /><div class="detail-art-fade"></div></div>
               <div class="detail-body">
                 <p class="eyebrow">{{ contextualItemLabel(selectedItem) }}</p>
-                <h2>{{ selectedItem.Name }}</h2>
+                <h2>{{ mediaPresentation(selectedItem).title }}</h2>
                 <div class="detail-meta"><span v-if="selectedItem.ProductionYear">{{ selectedItem.ProductionYear }}</span><span v-if="selectedItem.OfficialRating">{{ selectedItem.OfficialRating }}</span><span v-if="selectedItem.RunTimeTicks">{{ formatRuntime(selectedItem.RunTimeTicks) }}</span><span v-if="selectedItem.CommunityRating">评分 {{ selectedItem.CommunityRating.toFixed(1) }}</span></div>
                 <p class="detail-overview">{{ selectedItem.Overview || '暂无简介。' }}</p>
 
                 <div v-if="seasonItems.length" class="detail-subsection"><h3>选择季度</h3><div class="season-list"><button v-for="season in seasonItems" :key="season.Id" class="season-button" type="button" @click="openDetails(season)"><PosterImage :item="season" /><span>{{ season.Name }}</span><ChevronRight :size="16" /></button></div></div>
-                <div v-if="episodeItems.length" class="detail-subsection"><h3>分集</h3><div class="episode-list"><button v-for="episode in episodeItems" :key="episode.Id" class="episode-button" type="button" @click="openDetails(episode)"><span class="episode-number">{{ episode.IndexNumber === undefined ? '--' : String(episode.IndexNumber).padStart(2, '0') }}</span><span><strong>{{ episode.Name }}</strong><small>{{ formatRuntime(episode.RunTimeTicks) }}</small></span><ChevronRight :size="16" /></button></div></div>
+                <div v-if="episodeItems.length" class="detail-subsection"><h3>分集</h3><div class="episode-list"><button v-for="episode in episodeItems" :key="episode.Id" class="episode-button" type="button" @click="openDetails(episode)"><span class="episode-number">{{ episode.IndexNumber === undefined ? '--' : String(episode.IndexNumber).padStart(2, '0') }}</span><span><strong>{{ mediaPresentation(episode).title }}</strong><small>{{ formatRuntime(episode.RunTimeTicks) }}</small></span><ChevronRight :size="16" /></button></div></div>
 
                 <div v-if="selectedItem.Type === 'Movie' || selectedItem.Type === 'Episode'" class="detail-actions">
                   <div v-if="isDetailLoading" class="loading-inline"><LoaderCircle class="spin" :size="18" />读取播放选项</div>

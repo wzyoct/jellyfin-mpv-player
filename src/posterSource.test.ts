@@ -82,6 +82,27 @@ describe('resolvePosterSource', () => {
     }
 
     expect(resolveBackdropSources(series)).toEqual([
+      { itemId: 'series-1', imageType: 'Backdrop', tag: undefined },
+      { itemId: 'series-1', imageType: 'Primary', tag: 'series-primary' },
+    ])
+  })
+
+  it('keeps known image owners even when Emby omits image tags', () => {
+    const episode: EmbyItem = {
+      Id: 'episode-1',
+      Name: 'Episode',
+      Type: 'Episode',
+      SeriesId: 'series-1',
+      SeasonId: 'season-1',
+      ImageTags: { Primary: 'episode-primary' },
+    }
+    const season: EmbyItem = { Id: 'season-1', Name: 'Season 1', Type: 'Season' }
+    const series: EmbyItem = { Id: 'series-1', Name: 'Series', Type: 'Series', ImageTags: { Primary: 'series-primary' } }
+
+    expect(resolveBackdropSources(episode, [season, series])).toEqual([
+      { itemId: 'episode-1', imageType: 'Backdrop', tag: undefined },
+      { itemId: 'season-1', imageType: 'Backdrop', tag: undefined },
+      { itemId: 'series-1', imageType: 'Backdrop', tag: undefined },
       { itemId: 'series-1', imageType: 'Primary', tag: 'series-primary' },
     ])
   })

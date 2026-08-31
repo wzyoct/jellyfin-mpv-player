@@ -9,7 +9,7 @@ export interface PosterSource {
 }
 
 function addSource(sources: PosterSource[], source: PosterSource): void {
-  if (!source.tag) return
+  if (!source.itemId) return
   if (sources.some((candidate) => candidate.itemId === source.itemId && candidate.imageType === source.imageType && candidate.tag === source.tag)) return
   sources.push(source)
 }

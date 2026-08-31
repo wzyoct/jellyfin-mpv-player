@@ -6,6 +6,13 @@ export function resolveResumeTicks(item: EmbyItem, explicitTicks?: number): numb
   return Math.max(0, item.UserData?.PlaybackPositionTicks || 0)
 }
 
+export function isResumePositionReached(actual: unknown, targetSeconds: number, toleranceSeconds = 2): actual is number {
+  return typeof actual === 'number'
+    && Number.isFinite(actual)
+    && Number.isFinite(targetSeconds)
+    && Math.abs(actual - Math.max(0, targetSeconds)) <= Math.max(0.5, toleranceSeconds)
+}
+
 export function shouldAdvanceAfterEnd(input: {
   reason: string
   stopAfterCurrent: boolean

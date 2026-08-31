@@ -7,7 +7,7 @@ import { EmbyClient, normalizeServerUrl, type MediaSourceInfo, type PlaybackInfo
 import { MpvIpc, type MpvIpcMessage } from './mpvIpc'
 import { buildEpisodeQueue } from '../src/playbackQueue'
 import { chooseDefaultSubtitle } from '../src/subtitlePreference'
-import { resolveResumeTicks, shouldAdvanceAfterEnd } from './playbackLogic'
+import { isResumePositionReached, resolveResumeTicks, shouldAdvanceAfterEnd } from './playbackLogic'
 import type {
   AudioPreference,
   EmbyItem,
@@ -433,6 +433,25 @@ function buildStreamUrl(session: PlaybackSession, entry: PlaybackEntry): string 
   })
 }
 
+async function seekEntry(session: PlaybackSession, entry: PlaybackEntry, startTimeTicks: number): Promise<void> {
+  const targetSeconds = Math.max(0, startTimeTicks / 10_000_000)
+  if (!targetSeconds) return
+  await session.ipc.send(['seek', targetSeconds, 'absolute+exact'])
+  const deadline = Date.now() + 5000
+  let latestPosition: unknown
+  while (Date.now() < deadline) {
+    latestPosition = await session.ipc.getProperty('time-pos', 900).catch(() => undefined)
+    if (isResumePositionReached(latestPosition, targetSeconds)) {
+      entry.positionSeconds = latestPosition
+      entry.positionObserved = true
+      entry.positionFresh = true
+      return
+    }
+    await new Promise((resolve) => setTimeout(resolve, 120))
+  }
+  throw new Error(`MPV 未能跳转到续播位置（目标 ${Math.round(targetSeconds)} 秒，实际 ${typeof latestPosition === 'number' ? Math.round(latestPosition) : '未知'} 秒）`)
+}
+
 async function loadEntry(session: PlaybackSession, index: number, startTimeTicks = 0): Promise<void> {
   if (index < 0 || index >= session.queue.length || session.stopped) return
   const item = session.entries.get(index)?.item || await getClient().getItem(session.queue[index].itemId)
@@ -458,10 +477,7 @@ async function loadEntry(session: PlaybackSession, index: number, startTimeTicks
     session.currentIndex = index
     session.currentEntry = entry
     if (startTimeTicks > 0) {
-      await session.ipc.send(['seek', startTimeTicks / 10_000_000, 'absolute+exact'])
-      entry.positionSeconds = startTimeTicks / 10_000_000
-      entry.positionObserved = true
-      entry.positionFresh = true
+      await seekEntry(session, entry, startTimeTicks)
     }
     if (entry.subtitleStreamIndex !== undefined) {
       const subtitle = entry.source.MediaStreams?.find((stream) => stream.Type === 'Subtitle' && stream.Index === entry.subtitleStreamIndex)

@@ -23,6 +23,13 @@ function episodeLabel(item: EmbyItem): string {
   return item.ParentIndexNumber === 0 ? `特别篇 · ${episode}` : episode
 }
 
+function episodeName(item: EmbyItem): string {
+  const name = item.Name.trim()
+  const label = episodeLabel(item)
+  if (!name || name === label || name === '特别篇' || /^第\s*[\d一二三四五六七八九十百千万]+\s*集$/.test(name)) return label
+  return `${label} - ${name}`
+}
+
 function typeSubtitle(item: EmbyItem): string {
   if (item.Type === 'Movie') return item.ProductionYear ? `${item.ProductionYear} · 电影` : '电影'
   if (item.Type === 'Series') return item.ProductionYear ? `${item.ProductionYear} · 剧集` : '剧集'
@@ -48,7 +55,7 @@ export function contextualItemLabel(item: EmbyItem): string {
 }
 
 export function mediaPresentation(item: EmbyItem): MediaPresentation {
-  const title = item.Type === 'Episode' ? episodeLabel(item) : item.Name
+  const title = item.Type === 'Episode' ? episodeName(item) : item.Name
   const subtitle = typeSubtitle(item)
   const context = item.Type === 'Episode'
     ? [item.SeriesName, seasonLabel(item), item.Name && item.Name !== title ? item.Name : ''].filter(Boolean).join(' · ')

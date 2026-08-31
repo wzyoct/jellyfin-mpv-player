@@ -14,6 +14,11 @@ const props = withDefaults(defineProps<{
   eager: false,
 })
 
+const emit = defineEmits<{
+  loaded: [url: string]
+  failed: []
+}>()
+
 const imageRoot = ref<HTMLElement | null>(null)
 const imageUrl = ref('')
 const loading = ref(true)
@@ -41,16 +46,18 @@ async function loadImage(): Promise<void> {
 
 async function buildBackdropCandidates(): Promise<PosterSource[]> {
   const ancestors: EmbyItem[] = []
-  if (props.item.SeasonId) {
+  const seasonId = props.item.SeasonId || (props.item.Type === 'Episode' ? props.item.ParentId : undefined)
+  if (seasonId && seasonId !== props.item.Id) {
     try {
-      ancestors.push(await window.emby.getItem(props.item.SeasonId))
+      ancestors.push(await window.emby.getItem(seasonId))
     } catch {
       // The inherited parent metadata remains available when the season request fails.
     }
   }
-  if (props.item.SeriesId && props.item.SeriesId !== props.item.Id) {
+  const seriesId = props.item.SeriesId || (props.item.Type === 'Season' ? props.item.ParentId : undefined)
+  if (seriesId && seriesId !== props.item.Id && seriesId !== seasonId) {
     try {
-      ancestors.push(await window.emby.getItem(props.item.SeriesId))
+      ancestors.push(await window.emby.getItem(seriesId))
     } catch {
       // The item's own primary image remains the final fallback.
     }
@@ -61,8 +68,9 @@ async function buildBackdropCandidates(): Promise<PosterSource[]> {
 async function loadCandidate(requestId: number, index: number): Promise<void> {
   if (requestId !== loadRequestId) return
   const candidate = imageCandidates.value[index]
-  if (!candidate?.tag) {
+  if (!candidate?.itemId) {
     loading.value = false
+    emit('failed')
     return
   }
   activeCandidateIndex.value = index
@@ -78,7 +86,10 @@ async function loadCandidate(requestId: number, index: number): Promise<void> {
     await loadCandidate(requestId, index + 1)
     return
   }
-  if (requestId === loadRequestId) loading.value = false
+  if (requestId === loadRequestId) {
+    loading.value = false
+    emit('loaded', imageUrl.value)
+  }
 }
 
 function handleImageError(): void {
@@ -89,6 +100,7 @@ function handleImageError(): void {
     void loadCandidate(loadRequestId, nextIndex)
   } else {
     loading.value = false
+    emit('failed')
   }
 }
 
@@ -133,6 +145,7 @@ watch(() => [
   props.item.ParentBackdropItemId,
   props.item.ParentBackdropImageTags?.[0],
   props.item.SeasonId,
+  props.item.ParentId,
   props.item.SeriesId,
   props.item.SeriesPrimaryImageTag,
   props.source?.itemId,
@@ -142,7 +155,7 @@ watch(() => [
 
 <template>
   <div ref="imageRoot" class="poster-image" :class="[`poster-image--${variant}`, { 'is-loading': loading, 'has-image': imageUrl }]">
-    <img v-if="imageUrl" :src="imageUrl" :alt="item.Name" @load="loading = false" @error="handleImageError" />
+    <img v-if="imageUrl" :src="imageUrl" :alt="item.Name" @load="loading = false; emit('loaded', imageUrl)" @error="handleImageError" />
     <div v-else class="poster-placeholder">
       <ImageOff v-if="!loading" :size="variant === 'backdrop' ? 32 : 24" stroke-width="1.4" />
       <Film v-else :size="variant === 'backdrop' ? 32 : 24" stroke-width="1.4" />
