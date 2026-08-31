@@ -54,12 +54,19 @@ async function run() {
   assert.equal(new URL(lastUrl).searchParams.get('SeriesId'), 'series-1')
 
   responseBody = {
-    Items: [{ Id: 'episode-1', Name: '第一集', Type: 'Episode' }],
+    Items: [{ Id: 'episode-1', Name: '第一集', Type: 'Episode', ParentBackdropItemId: 'season-1', ParentBackdropImageTags: ['season-backdrop'] }],
     TotalRecordCount: 1,
   }
   const episodes = await client.getSeriesEpisodes('series-1')
   assert.deepEqual(episodes, responseBody.Items)
-  assert.equal(new URL(lastUrl).searchParams.get('SeriesId'), 'series-1')
+  assert.match(lastUrl, /\/emby\/Shows\/series-1\/Episodes\?/)
+  assert.equal(new URL(lastUrl).searchParams.get('IncludeItemTypes'), 'Episode')
+  assert.equal(new URL(lastUrl).searchParams.get('EnableImageTypes'), 'Primary,Backdrop,Thumb')
+
+  responseBody = { Id: 'episode-1', Name: '第一集', Type: 'Episode', ParentBackdropItemId: 'season-1', ParentBackdropImageTags: ['season-backdrop'] }
+  const detailed = await client.getItem('episode-1')
+  assert.deepEqual(detailed, responseBody)
+  assert.equal(new URL(lastUrl).searchParams.get('EnableImageTypes'), 'Primary,Backdrop,Thumb')
 
   responseBody = {
     Items: [{ Id: 'resume-1', Name: '续播电影', Type: 'Movie' }],
@@ -68,8 +75,15 @@ async function run() {
   await client.getItems({ includeItemTypes: 'Movie,Episode', filters: 'IsResumable', sortBy: 'DatePlayed' })
   assert.equal(new URL(lastUrl).searchParams.get('Filters'), 'IsResumable')
 
-  await client.reportProgress({ ItemId: 'resume-1', PositionTicks: 12_000_000, IsPaused: false })
-  assert.equal(JSON.parse(lastInit.body).PositionTicks, 12_000_000)
+  await client.reportProgress({ ItemId: 'resume-1', PositionTicks: 12_000_000, IsPaused: false, QueueableMediaTypes: ['Video'] })
+  const progressPayload = JSON.parse(lastInit.body)
+  assert.equal(progressPayload.PositionTicks, 12_000_000)
+  assert.equal(progressPayload.QueueableMediaTypes[0], 'Video')
+
+  await client.reportPlaying({ ItemId: 'resume-1', PositionTicks: 12_000_000 })
+  assert.equal(JSON.parse(lastInit.body).EventName, undefined)
+  await client.reportStopped({ ItemId: 'resume-1', PositionTicks: 12_000_000 })
+  assert.equal(JSON.parse(lastInit.body).EventName, undefined)
 
   const streamUrl = client.buildStreamUrl('resume-1', { Id: 'source-1' }, { playSessionId: 'session-1' })
   assert.equal(new URL(streamUrl).searchParams.get('PlaySessionId'), 'session-1')

@@ -54,6 +54,23 @@ export class MpvIpc {
     return () => this.eventListeners.delete(listener)
   }
 
+  waitForEvent(predicate: (message: MpvIpcMessage) => boolean, timeoutMs = 15_000): Promise<MpvIpcMessage> {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        removeListener()
+        reject(new Error('MPV 未在规定时间内完成媒体加载'))
+      }, timeoutMs)
+      const listener = (message: MpvIpcMessage) => {
+        if (!predicate(message)) return
+        clearTimeout(timer)
+        removeListener()
+        resolve(message)
+      }
+      const removeListener = () => this.eventListeners.delete(listener)
+      this.eventListeners.add(listener)
+    })
+  }
+
   async connectWithRetry(timeoutMs = 8000): Promise<void> {
     const deadline = Date.now() + timeoutMs
     let lastError = new Error('无法连接 MPV IPC')
@@ -98,6 +115,7 @@ export class MpvIpc {
 
   close(): void {
     this.rejectPending(new Error('MPV IPC 已关闭'))
+    for (const listener of [...this.eventListeners]) listener({ event: 'ipc-closed' })
     this.socket?.destroy()
     this.socket = null
     this.buffer = ''

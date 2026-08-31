@@ -76,7 +76,7 @@ const playbackInfo = ref<PlaybackInfo | null>(null)
 const seasonItems = ref<EmbyItem[]>([])
 const episodeItems = ref<EmbyItem[]>([])
 const selectedAudio = ref<number | undefined>()
-const selectedSubtitle = ref<number | undefined>()
+const selectedSubtitle = ref<number | null>(null)
 const isLoading = ref(false)
 const homeLoading = ref(false)
 const libraryLoading = ref(false)
@@ -108,8 +108,6 @@ const form = reactive({
   username: '',
   password: '',
   mpvPath: 'mpv.exe',
-  continuousPlayback: true,
-  preferChineseSubtitles: true,
 })
 
 const isConnected = computed(() => Boolean(settings.value?.connected))
@@ -182,8 +180,6 @@ function applySettings(next: PublicSettings): void {
   form.serverUrl = next.serverUrl
   form.username = next.username
   form.mpvPath = next.mpvPath || 'mpv.exe'
-  form.continuousPlayback = next.continuousPlayback
-  form.preferChineseSubtitles = next.preferChineseSubtitles
 }
 
 function viewSupportsFilter(view: EmbyView, filter: LibraryFilter): boolean {
@@ -396,8 +392,6 @@ async function submitConnection(): Promise<void> {
         serverUrl: form.serverUrl,
         username: form.username,
         mpvPath: form.mpvPath,
-        continuousPlayback: form.continuousPlayback,
-        preferChineseSubtitles: form.preferChineseSubtitles,
       }))
       showNotice('设置已保存')
     } catch (error) {
@@ -416,8 +410,6 @@ async function submitConnection(): Promise<void> {
       username: form.username,
       password: form.password,
       mpvPath: form.mpvPath,
-      continuousPlayback: form.continuousPlayback,
-      preferChineseSubtitles: form.preferChineseSubtitles,
     })
     applySettings(result.settings)
     form.password = ''
@@ -517,7 +509,7 @@ async function loadPlayableDetails(item: EmbyItem): Promise<void> {
     const streams = (playbackInfo.value.MediaSources?.[0]?.MediaStreams || item.MediaStreams || []) as MediaStream[]
     selectedAudio.value = streams.find((stream) => stream.Type === 'Audio' && stream.IsDefault)?.Index
       ?? streams.find((stream) => stream.Type === 'Audio')?.Index
-    selectedSubtitle.value = chooseDefaultSubtitle(streams)
+    selectedSubtitle.value = chooseDefaultSubtitle(streams) ?? null
   } catch (error) {
     showNotice(error instanceof Error ? error.message : '读取播放信息失败', 'error')
   } finally {
@@ -532,7 +524,7 @@ async function openDetails(item: EmbyItem): Promise<void> {
   seasonItems.value = []
   episodeItems.value = []
   selectedAudio.value = undefined
-  selectedSubtitle.value = undefined
+  selectedSubtitle.value = null
   isDetailLoading.value = true
   try {
     const detailed = await window.emby.getItem(item.Id)
@@ -588,11 +580,11 @@ async function playSelected(): Promise<void> {
   try {
     const snapshot = await window.emby.playbackStart({
       itemId: item.Id,
-      mode: item.Type === 'Episode' && form.continuousPlayback ? 'series' : 'single',
       mediaSourceId: selectedSource.value?.Id,
-      startTimeTicks: resumePosition(item),
       audioPreference: { index: selectedAudio.value },
-      subtitlePreference: { index: selectedSubtitle.value, chinesePreferred: form.preferChineseSubtitles },
+      subtitlePreference: selectedSubtitle.value === null
+        ? { disabled: true }
+        : { index: selectedSubtitle.value },
     })
     handlePlaybackSnapshot(snapshot)
     closeDetails()
@@ -606,9 +598,6 @@ async function playItemDirect(item: EmbyItem): Promise<void> {
   try {
     const snapshot = await window.emby.playbackStart({
       itemId: item.Id,
-      mode: item.Type === 'Episode' && form.continuousPlayback ? 'series' : 'single',
-      startTimeTicks: resumePosition(item),
-      subtitlePreference: { chinesePreferred: form.preferChineseSubtitles },
     })
     handlePlaybackSnapshot(snapshot)
     showNotice(`正在用 MPV 播放《${item.Name}》`)
@@ -702,9 +691,7 @@ async function retryPlayback(): Promise<void> {
   try {
     const snapshot = await window.emby.playbackStart({
       itemId,
-      mode: playbackSnapshot.value.queue.length > 1 && form.continuousPlayback ? 'series' : 'single',
       startTimeTicks: playbackSnapshot.value.positionTicks,
-      subtitlePreference: { chinesePreferred: form.preferChineseSubtitles },
     })
     handlePlaybackSnapshot(snapshot)
   } catch (error) {
@@ -843,9 +830,6 @@ onUnmounted(() => {
               <button class="button button--ghost" type="button" @click="validateMpv(true)"><Play :size="16" />测试启动</button>
               <span v-if="mpvValidation" class="mpv-status" :class="{ 'mpv-status--error': !mpvValidation.valid }">{{ mpvValidation.message }}<small v-if="mpvValidation.version">{{ mpvValidation.version }}</small></span>
             </div>
-            <label class="setting-toggle"><input v-model="form.continuousPlayback" type="checkbox" /><span>电视剧自动连续播放下一集</span></label>
-            <label class="setting-toggle"><input v-model="form.preferChineseSubtitles" type="checkbox" /><span>优先选择中文字幕</span></label>
-
             <div v-if="errorMessage" class="inline-error"><AlertCircle :size="16" />{{ errorMessage }}</div>
             <div class="settings-actions">
               <button v-if="isConnected" class="button button--ghost" type="button" @click="disconnect">
@@ -1036,7 +1020,7 @@ onUnmounted(() => {
                   <div v-if="isDetailLoading" class="loading-inline"><LoaderCircle class="spin" :size="18" />读取播放选项</div>
                   <template v-else>
                     <label v-if="audioStreams.length" class="track-select"><Volume2 :size="16" /><select v-model="selectedAudio" aria-label="选择音轨"><option :value="undefined">默认音轨</option><option v-for="stream in audioStreams" :key="stream.Index" :value="stream.Index">{{ streamLabel(stream, 'audio') }}</option></select></label>
-                    <label v-if="subtitleStreams.length" class="track-select"><Menu :size="16" /><select v-model="selectedSubtitle" aria-label="选择字幕"><option :value="undefined">关闭字幕</option><option v-for="stream in subtitleStreams" :key="stream.Index" :value="stream.Index">{{ streamLabel(stream, 'subtitle') }}{{ stream.Index === selectedSubtitleStream?.Index ? '（当前）' : '' }}</option></select></label>
+                    <label v-if="subtitleStreams.length" class="track-select"><Menu :size="16" /><select v-model="selectedSubtitle" aria-label="选择字幕"><option :value="null">关闭字幕</option><option v-for="stream in subtitleStreams" :key="stream.Index" :value="stream.Index">{{ streamLabel(stream, 'subtitle') }}{{ stream.Index === selectedSubtitleStream?.Index ? '（当前）' : '' }}</option></select></label>
                     <button class="button button--primary button--large" type="button" :disabled="isDetailLoading" @click="playSelected"><Play :size="18" fill="currentColor" />{{ resumePosition(selectedItem) ? '继续播放' : '播放' }}</button>
                   </template>
                 </div>

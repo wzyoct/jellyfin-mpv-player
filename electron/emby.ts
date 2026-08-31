@@ -162,6 +162,7 @@ export class EmbyClient {
       Limit: String(options.limit || 48),
       Fields: 'Overview,Genres,MediaStreams,ProviderIds,DateCreated,UserData',
       EnableImages: 'true',
+      EnableImageTypes: 'Primary,Backdrop,Thumb',
       EnableUserData: 'true',
       ImageTypeLimit: '1',
     })
@@ -198,6 +199,7 @@ export class EmbyClient {
       Fields: 'Overview,Genres,MediaStreams,ProviderIds,DateCreated,UserData',
       EnableUserData: 'true',
       EnableImages: 'true',
+      EnableImageTypes: 'Primary,Backdrop,Thumb',
     })
     return this.request(`/Users/${encodeURIComponent(this.userId)}/Items/${encodeURIComponent(itemId)}?${params.toString()}`)
   }
@@ -213,6 +215,7 @@ export class EmbyClient {
       Limit: '100',
       Fields: 'Overview,MediaStreams,DateCreated,UserData',
       EnableImages: 'true',
+      EnableImageTypes: 'Primary,Backdrop,Thumb',
       EnableUserData: 'true',
       ImageTypeLimit: '1',
     })
@@ -231,7 +234,6 @@ export class EmbyClient {
     while (startIndex < totalRecordCount && pageCount < 200) {
       const params = new URLSearchParams({
         UserId: this.userId,
-        SeriesId: seriesId,
         IncludeItemTypes: 'Episode',
         Recursive: 'true',
         SortBy: 'ParentIndexNumber,IndexNumber,SortName',
@@ -240,12 +242,13 @@ export class EmbyClient {
         Limit: '100',
         Fields: 'Overview,MediaStreams,DateCreated,UserData',
         EnableImages: 'true',
+        EnableImageTypes: 'Primary,Backdrop,Thumb',
         EnableUserData: 'true',
         ImageTypeLimit: '1',
       })
       const result = parseQueryResult<EmbyItem>(
-        await this.request(`/Users/${encodeURIComponent(this.userId)}/Items?${params.toString()}`),
-        '/Users/{UserId}/Items',
+        await this.request(`/Shows/${encodeURIComponent(seriesId)}/Episodes?${params.toString()}`),
+        '/Shows/{SeriesId}/Episodes',
       ) as ItemResult
       items.push(...result.Items)
       totalRecordCount = result.TotalRecordCount
@@ -271,7 +274,6 @@ export class EmbyClient {
   buildStreamUrl(itemId: string, source: MediaSourceInfo, options: {
     audioStreamIndex?: number
     subtitleStreamIndex?: number
-    startTimeTicks?: number
     playSessionId?: string
   }): string {
     const rawUrl = source.DirectStreamUrl || `/Videos/${encodeURIComponent(itemId)}/stream`
@@ -282,14 +284,12 @@ export class EmbyClient {
     }
     if (options.audioStreamIndex !== undefined) url.searchParams.set('AudioStreamIndex', String(options.audioStreamIndex))
     if (options.subtitleStreamIndex !== undefined) url.searchParams.set('SubtitleStreamIndex', String(options.subtitleStreamIndex))
-    if (options.startTimeTicks) url.searchParams.set('StartTimeTicks', String(Math.round(options.startTimeTicks)))
     if (options.playSessionId) url.searchParams.set('PlaySessionId', options.playSessionId)
     return url.toString()
   }
 
-  buildSubtitleUrl(itemId: string, mediaSourceId: string, subtitleIndex: number, startTimeTicks?: number): string {
+  buildSubtitleUrl(itemId: string, mediaSourceId: string, subtitleIndex: number): string {
     const url = new URL(this.resolveUrl(`/Videos/${encodeURIComponent(itemId)}/${encodeURIComponent(mediaSourceId)}/Subtitles/${subtitleIndex}/Stream.srt`))
-    if (startTimeTicks) url.searchParams.set('StartPositionTicks', String(Math.round(startTimeTicks)))
     return url.toString()
   }
 

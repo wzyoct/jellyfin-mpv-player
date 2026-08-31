@@ -7,25 +7,39 @@ function subtitle(index: number, options: Partial<MediaStream> = {}): MediaStrea
 }
 
 describe('chooseDefaultSubtitle', () => {
-  it('prefers an external Chinese subtitle over an internal default subtitle', () => {
+  it('always prioritizes simplified Chinese, with external tracks first', () => {
     expect(chooseDefaultSubtitle([
       subtitle(0, { Language: 'en', IsDefault: true }),
       subtitle(1, { Language: 'zh-CN', IsExternal: true }),
     ])).toBe(1)
   })
 
-  it('keeps external priority when only the external subtitle is not Chinese', () => {
+  it('prefers embedded simplified Chinese over external non-Chinese subtitles', () => {
     expect(chooseDefaultSubtitle([
-      subtitle(2, { Language: 'zh', IsExternal: false }),
+      subtitle(2, { Language: 'zh-Hans', IsExternal: false }),
       subtitle(3, { Language: 'en', IsExternal: true }),
-    ])).toBe(3)
+    ])).toBe(2)
   })
 
-  it('prefers Chinese when there is no external subtitle', () => {
+  it('prefers other Chinese before a non-Chinese default', () => {
     expect(chooseDefaultSubtitle([
       subtitle(4, { Language: 'en', IsDefault: true }),
-      subtitle(5, { DisplayTitle: '简体中文' }),
+      subtitle(5, { Language: 'zh' }),
     ])).toBe(5)
+  })
+
+  it('prefers simplified Chinese over traditional Chinese', () => {
+    expect(chooseDefaultSubtitle([
+      subtitle(9, { Language: 'zh-Hant', IsExternal: true }),
+      subtitle(10, { Language: 'zh-CN' }),
+    ])).toBe(10)
+  })
+
+  it('falls back to the server default when no Chinese subtitle exists', () => {
+    expect(chooseDefaultSubtitle([
+      subtitle(7, { Language: 'en' }),
+      subtitle(8, { Language: 'ja', IsDefault: true }),
+    ])).toBe(8)
   })
 
   it('supports a stream index of zero', () => {

@@ -42,6 +42,11 @@ export interface EmbyItem {
   SeriesPrimaryImageTag?: string
   ImageTags?: Record<string, string>
   BackdropImageTags?: string[]
+  ParentBackdropItemId?: string
+  ParentBackdropImageTags?: string[]
+  ParentThumbItemId?: string
+  ParentThumbImageTag?: string
+  LocationType?: 'FileSystem' | 'Remote' | 'Virtual' | string
   UserData?: UserData
   MediaStreams?: MediaStream[]
   Genres?: string[]
@@ -108,8 +113,6 @@ export interface PublicSettings {
   mpvPath: string
   connected: boolean
   secureStorageAvailable: boolean
-  continuousPlayback: boolean
-  preferChineseSubtitles: boolean
 }
 
 export interface LoginResult {
@@ -124,8 +127,6 @@ export interface SettingsInput {
   serverUrl: string
   username: string
   mpvPath: string
-  continuousPlayback?: boolean
-  preferChineseSubtitles?: boolean
 }
 
 export interface MpvValidationResult {
@@ -166,14 +167,11 @@ export interface AudioPreference {
 
 export interface SubtitlePreference {
   index?: number
-  language?: string
-  external?: boolean
-  chinesePreferred?: boolean
+  disabled?: boolean
 }
 
 export interface StartPlaybackRequest {
   itemId: string
-  mode: 'single' | 'series'
   startTimeTicks?: number
   mediaSourceId?: string
   audioPreference?: AudioPreference
@@ -228,13 +226,14 @@ export interface PlaybackReportPayload {
   SubtitleStreamIndex?: number
   PlaylistIndex?: number
   PlaylistLength?: number
-  EventName?: string
+  EventName?: 'TimeUpdate' | 'Pause' | 'Unpause' | 'VolumeChange' | 'RepeatModeChange' | 'AudioTrackChange' | 'SubtitleTrackChange' | 'PlaylistItemMove' | 'PlaylistItemRemove' | 'PlaylistItemAdd' | 'QualityChange' | 'SubtitleOffsetChange' | 'PlaybackRateChange'
+  QueueableMediaTypes?: string[]
 }
 
 export interface EmberApi {
   getSettings(): Promise<PublicSettings>
   saveSettings(input: SettingsInput): Promise<PublicSettings>
-  login(input: { serverUrl: string; username: string; password: string; mpvPath: string; continuousPlayback?: boolean; preferChineseSubtitles?: boolean }): Promise<LoginResult>
+  login(input: { serverUrl: string; username: string; password: string; mpvPath: string }): Promise<LoginResult>
   logout(): Promise<PublicSettings>
   getViews(): Promise<EmbyView[]>
   getItems(query?: ItemsQuery): Promise<ItemResult>

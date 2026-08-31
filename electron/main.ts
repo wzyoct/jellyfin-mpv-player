@@ -6,6 +6,8 @@ import { dirname, join } from 'node:path'
 import { EmbyClient, normalizeServerUrl, type MediaSourceInfo, type PlaybackInfo } from './emby'
 import { MpvIpc, type MpvIpcMessage } from './mpvIpc'
 import { buildEpisodeQueue } from '../src/playbackQueue'
+import { chooseDefaultSubtitle } from '../src/subtitlePreference'
+import { resolveResumeTicks, shouldAdvanceAfterEnd } from './playbackLogic'
 import type {
   AudioPreference,
   EmbyItem,
@@ -27,8 +29,6 @@ interface StoredSettings {
   encryptedToken?: string
   mpvPath: string
   deviceId: string
-  continuousPlayback?: boolean
-  preferChineseSubtitles?: boolean
 }
 
 interface PlaybackEntry extends PlaybackQueueItem {
@@ -60,6 +60,7 @@ interface PlaybackSession {
   progressPromise?: Promise<void>
   finalizePromise?: Promise<void>
   loadingNext: boolean
+  transitioning: boolean
   stopAfterCurrent: boolean
   stopped: boolean
   syncError?: string
@@ -111,12 +112,16 @@ function writeCachedImage(key: string, value: string): void {
 function readSettings(): void {
   if (!settingsPath || !existsSync(settingsPath)) return
   try {
-    const parsed = JSON.parse(readFileSync(settingsPath, 'utf8')) as Partial<StoredSettings>
+    const parsed = JSON.parse(readFileSync(settingsPath, 'utf8')) as Partial<StoredSettings> & {
+      continuousPlayback?: unknown
+      preferChineseSubtitles?: unknown
+    }
+    const { continuousPlayback: _legacyContinuousPlayback, preferChineseSubtitles: _legacyChineseSubtitles, ...persisted } = parsed
     storedSettings = {
       ...storedSettings,
-      ...parsed,
-      mpvPath: parsed.mpvPath || 'mpv.exe',
-      deviceId: parsed.deviceId || randomUUID(),
+      ...persisted,
+      mpvPath: persisted.mpvPath || 'mpv.exe',
+      deviceId: persisted.deviceId || randomUUID(),
     }
     persistSettings()
   } catch {
@@ -147,8 +152,6 @@ function publicSettings() {
     mpvPath: storedSettings.mpvPath || 'mpv.exe',
     connected: Boolean(embyClient),
     secureStorageAvailable: safeStorage.isEncryptionAvailable(),
-    continuousPlayback: storedSettings.continuousPlayback !== false,
-    preferChineseSubtitles: storedSettings.preferChineseSubtitles !== false,
   }
 }
 
@@ -215,11 +218,12 @@ function queueItem(item: EmbyItem): PlaybackQueueItem {
   }
 }
 
-async function buildQueue(client: EmbyClient, itemId: string, mode: StartPlaybackRequest['mode']): Promise<EmbyItem[]> {
+async function buildQueue(client: EmbyClient, itemId: string): Promise<EmbyItem[]> {
   const selected = await client.getItem(itemId)
-  if (mode === 'single' || selected.Type !== 'Episode' || !selected.SeriesId) return [selected]
+  if (selected.Type !== 'Episode' || !selected.SeriesId) return [selected]
 
-  return buildEpisodeQueue(await client.getSeriesEpisodes(selected.SeriesId), selected)
+  const episodes = (await client.getSeriesEpisodes(selected.SeriesId)).filter((item) => item.LocationType?.toLowerCase() !== 'virtual')
+  return buildEpisodeQueue(episodes, selected)
 }
 
 function chooseAudio(streams: MediaStream[], preference?: AudioPreference): number | undefined {
@@ -233,14 +237,9 @@ function chooseAudio(streams: MediaStream[], preference?: AudioPreference): numb
 }
 
 function chooseSubtitle(streams: MediaStream[], preference?: SubtitlePreference): number | undefined {
+  if (preference?.disabled) return undefined
   if (preference?.index !== undefined && streams.some((stream) => stream.Type === 'Subtitle' && stream.Index === preference.index)) return preference.index
-  if (preference?.external) {
-    const external = streams.find((stream) => stream.Type === 'Subtitle' && stream.IsExternal)
-    if (external?.Index !== undefined) return external.Index
-  }
-  const chinese = streams.find((stream) => stream.Type === 'Subtitle' && /zh|chi|中文|chinese/i.test(`${stream.Language || ''} ${stream.DisplayLanguage || ''} ${stream.Title || ''} ${stream.DisplayTitle || ''}`))
-  if (preference?.chinesePreferred !== false && chinese?.Index !== undefined) return chinese.Index
-  return streams.find((stream) => stream.Type === 'Subtitle' && stream.IsDefault)?.Index
+  return chooseDefaultSubtitle(streams)
 }
 
 async function prepareEntry(session: PlaybackSession, item: EmbyItem, startTimeTicks = 0): Promise<PlaybackEntry> {
@@ -302,7 +301,7 @@ function emitPlayback(type: PlaybackEvent['type'], session: PlaybackSession | nu
   return snapshot
 }
 
-function reportPayload(session: PlaybackSession, entry: PlaybackEntry, eventName?: string): PlaybackReportPayload {
+function reportPayload(session: PlaybackSession, entry: PlaybackEntry, eventName?: PlaybackProgressEvent): PlaybackReportPayload {
   return {
     ItemId: entry.itemId,
     MediaSourceId: entry.source.Id,
@@ -315,11 +314,14 @@ function reportPayload(session: PlaybackSession, entry: PlaybackEntry, eventName
     SubtitleStreamIndex: entry.subtitleStreamIndex,
     PlaylistIndex: session.currentIndex,
     PlaylistLength: session.queue.length,
-    EventName: eventName,
+    QueueableMediaTypes: ['Video'],
+    ...(eventName ? { EventName: eventName } : {}),
   }
 }
 
-async function reportEntryProgress(session: PlaybackSession, entry: PlaybackEntry, force = false, eventName = 'TimeUpdate'): Promise<void> {
+type PlaybackProgressEvent = NonNullable<PlaybackReportPayload['EventName']>
+
+async function reportEntryProgress(session: PlaybackSession, entry: PlaybackEntry, force = false, eventName: PlaybackProgressEvent = 'TimeUpdate'): Promise<void> {
   const client = embyClient
   if (!client || entry.finalized || (!force && !entry.positionFresh && !entry.isPaused)) return
   await client.reportProgress(reportPayload(session, entry, eventName))
@@ -328,7 +330,7 @@ async function reportEntryProgress(session: PlaybackSession, entry: PlaybackEntr
   emitPlayback('progress', session)
 }
 
-async function reportActiveProgress(force = false, eventName = 'TimeUpdate'): Promise<void> {
+async function reportActiveProgress(force = false, eventName: PlaybackProgressEvent = 'TimeUpdate'): Promise<void> {
   const session = activeSession
   if (!session || session.stopped || !session.currentEntry) return
   if (session.progressPromise) {
@@ -376,12 +378,17 @@ async function finalizeEntry(session: PlaybackSession, reason: string, keepProce
   if (!entry || entry.finalized) return
   await readLatestMpvState(session)
   session.endReason = reason
-  await reportActiveProgress(true, reason === 'eof' ? 'TimeUpdate' : 'Stop')
+  if (reason === 'eof' && entry.durationSeconds !== undefined) {
+    entry.positionSeconds = Math.max(entry.positionSeconds, entry.durationSeconds)
+    entry.positionObserved = true
+    entry.positionFresh = true
+  }
+  await reportActiveProgress(true, 'TimeUpdate')
   if (!entry.positionObserved && !session.syncError) session.syncError = '未能取得 MPV 的最终播放位置'
   const client = embyClient
   if (client) {
     try {
-      await client.reportStopped(reportPayload(session, entry, 'Stopped'))
+      await client.reportStopped(reportPayload(session, entry))
       session.syncError = undefined
     } catch (error) {
       session.syncError = error instanceof Error ? error.message : 'Emby 播放结束状态上报失败'
@@ -398,6 +405,7 @@ async function finishSession(session: PlaybackSession, reason: string, terminate
     return
   }
   session.finalizePromise = (async () => {
+    session.transitioning = true
     session.phase = 'stopping'
     session.endReason = reason
     emitPlayback('snapshot', session)
@@ -417,11 +425,10 @@ async function finishSession(session: PlaybackSession, reason: string, terminate
   await session.finalizePromise
 }
 
-function buildStreamUrl(session: PlaybackSession, entry: PlaybackEntry, startTimeTicks: number): string {
+function buildStreamUrl(session: PlaybackSession, entry: PlaybackEntry): string {
   return getClient().buildStreamUrl(entry.itemId, entry.source, {
     audioStreamIndex: entry.audioStreamIndex,
     subtitleStreamIndex: entry.subtitleStreamIndex,
-    startTimeTicks,
     playSessionId: entry.playbackInfo.PlaySessionId,
   })
 }
@@ -434,41 +441,72 @@ async function loadEntry(session: PlaybackSession, index: number, startTimeTicks
     ? { ...cachedEntry, positionSeconds: Math.max(0, startTimeTicks / 10_000_000), positionFresh: false, positionObserved: false, isPaused: false }
     : await prepareEntry(session, item, startTimeTicks)
   session.entries.set(index, entry)
-  session.currentIndex = index
-  session.currentEntry = entry
   session.phase = 'switching'
   session.loadingNext = true
+  session.transitioning = true
   try {
+    await session.ipc.send(['set', 'pause', true])
+    const loaded = session.ipc.waitForEvent(
+      (message) => message.event === 'file-loaded' || message.event === 'end-file' || message.event === 'ipc-closed',
+    )
     await session.ipc.send(['set', 'http-header-fields', formatHeaderFields(entry.source, getClient().token)])
-    await session.ipc.send(['loadfile', buildStreamUrl(session, entry, startTimeTicks), 'replace'])
+    await session.ipc.send(['loadfile', buildStreamUrl(session, entry), 'replace'])
+    const loadEvent = await loaded
+    if (loadEvent.event !== 'file-loaded') {
+      throw new Error(loadEvent.file_error || `《${entry.name}》加载失败`)
+    }
+    session.currentIndex = index
+    session.currentEntry = entry
+    if (startTimeTicks > 0) {
+      await session.ipc.send(['seek', startTimeTicks / 10_000_000, 'absolute+exact'])
+      entry.positionSeconds = startTimeTicks / 10_000_000
+      entry.positionObserved = true
+      entry.positionFresh = true
+    }
     if (entry.subtitleStreamIndex !== undefined) {
       const subtitle = entry.source.MediaStreams?.find((stream) => stream.Type === 'Subtitle' && stream.Index === entry.subtitleStreamIndex)
       if (!subtitle || subtitle.IsTextSubtitleStream !== false) {
-        await session.ipc.send(['sub-add', getClient().buildSubtitleUrl(entry.itemId, entry.source.Id, entry.subtitleStreamIndex, startTimeTicks), 'select']).catch(() => undefined)
+        await session.ipc.send(['sub-add', getClient().buildSubtitleUrl(entry.itemId, entry.source.Id, entry.subtitleStreamIndex), 'select']).catch(() => undefined)
       }
     }
+    entry.isPaused = false
+    await session.ipc.send(['set', 'pause', false])
     const client = embyClient
     if (client) {
       try {
-        await client.reportPlaying(reportPayload(session, entry, 'Start'))
+        await client.reportPlaying(reportPayload(session, entry))
         session.syncError = undefined
       } catch (error) {
         session.syncError = error instanceof Error ? error.message : 'Emby 播放开始状态上报失败'
       }
     }
-    session.phase = entry.isPaused ? 'paused' : 'playing'
+    session.phase = 'playing'
     emitPlayback('snapshot', session)
   } finally {
     session.loadingNext = false
+    session.transitioning = false
   }
 }
 
 async function handleEndFile(session: PlaybackSession, message: MpvIpcMessage): Promise<void> {
-  if (session.stopped || !session.currentEntry || session.currentEntry.finalized) return
+  if (session.stopped || session.transitioning || session.loadingNext || !session.currentEntry || session.currentEntry.finalized) return
   const reason = message.reason || (message.file_error ? 'error' : 'eof')
-  if (reason === 'eof' && !session.stopAfterCurrent && session.currentIndex + 1 < session.queue.length) {
-    await finalizeEntry(session, 'eof', true)
-    await loadEntry(session, session.currentIndex + 1)
+  if (shouldAdvanceAfterEnd({
+    reason,
+    stopAfterCurrent: session.stopAfterCurrent,
+    currentIndex: session.currentIndex,
+    queueLength: session.queue.length,
+    transitioning: session.transitioning || session.loadingNext,
+  })) {
+    session.loadingNext = true
+    session.transitioning = true
+    try {
+      await finalizeEntry(session, 'eof', true)
+      await loadEntry(session, session.currentIndex + 1)
+    } finally {
+      session.loadingNext = false
+      session.transitioning = false
+    }
     return
   }
   await finishSession(session, reason, true)
@@ -492,7 +530,7 @@ async function attachMpvIpc(session: PlaybackSession): Promise<void> {
         void reportActiveProgress(true, message.data ? 'Pause' : 'Unpause')
         emitPlayback('snapshot', session)
       }
-    } else if (message.event === 'end-file') {
+    } else if (message.event === 'end-file' && !session.transitioning) {
       void handleEndFile(session, message).catch((error) => {
         session.syncError = error instanceof Error ? error.message : '切换下一集失败'
         session.phase = 'error'
@@ -519,7 +557,10 @@ async function stopActivePlayback(): Promise<void> {
 async function startPlayback(request: StartPlaybackRequest): Promise<PlaybackSnapshot> {
   const client = getClient()
   await stopActivePlayback()
-  const items = await buildQueue(client, request.itemId, request.mode)
+  const items = await buildQueue(client, request.itemId)
+  if (!items.length) throw new Error('没有可播放的剧集')
+  const selected = items[0]
+  const resumeTicks = resolveResumeTicks(selected, request.startTimeTicks)
   const pipeName = `\\\\.\\pipe\\ember-player-${randomUUID()}`
   const session: PlaybackSession = {
     sessionId: randomUUID(),
@@ -533,16 +574,18 @@ async function startPlayback(request: StartPlaybackRequest): Promise<PlaybackSna
     ipc: new MpvIpc(pipeName),
     progressTimer: undefined as unknown as NodeJS.Timeout,
     loadingNext: false,
+    transitioning: false,
     stopAfterCurrent: false,
     stopped: false,
     audioPreference: request.audioPreference,
     subtitlePreference: request.subtitlePreference,
   }
   session.mediaSourceId = request.mediaSourceId
-  const firstEntry = await prepareEntry(session, items[0], request.startTimeTicks || 0)
+  const firstEntry = await prepareEntry(session, selected, resumeTicks)
   session.entries.set(0, firstEntry)
   const args = [
     '--idle=yes',
+    '--pause=yes',
     '--force-window=immediate',
     '--resume-playback=no',
     '--title=Ember Player',
@@ -561,7 +604,7 @@ async function startPlayback(request: StartPlaybackRequest): Promise<PlaybackSna
   })
   try {
     await attachMpvIpc(session)
-    await loadEntry(session, 0, request.startTimeTicks || 0)
+    await loadEntry(session, 0, resumeTicks)
     return emitPlayback('snapshot', session)
   } catch (error) {
     await finishSession(session, 'error', true)
@@ -572,45 +615,57 @@ async function startPlayback(request: StartPlaybackRequest): Promise<PlaybackSna
 async function playbackCommand(request: PlaybackCommand): Promise<PlaybackSnapshot> {
   const session = activeSession
   if (!session || session.sessionId !== request.sessionId) return lastSnapshot
-  if (request.command === 'stop') {
-    await finishSession(session, 'quit', true)
-  } else if (request.command === 'stop-after-current') {
-    session.stopAfterCurrent = !session.stopAfterCurrent
-    emitPlayback('snapshot', session)
-  } else if (request.command === 'pause' || request.command === 'resume') {
-    await session.ipc.send(['set', 'pause', request.command === 'pause'])
-  } else if (request.command === 'next' || request.command === 'previous') {
-    const nextIndex = request.command === 'next' ? session.currentIndex + 1 : session.currentIndex - 1
-    if (nextIndex >= 0 && nextIndex < session.queue.length) {
-      await finalizeEntry(session, 'skip', true)
-      await loadEntry(session, nextIndex)
+  try {
+    if (request.command === 'stop') {
+      await finishSession(session, 'quit', true)
+    } else if (request.command === 'stop-after-current') {
+      session.stopAfterCurrent = !session.stopAfterCurrent
+      emitPlayback('snapshot', session)
+    } else if (request.command === 'pause' || request.command === 'resume') {
+      await session.ipc.send(['set', 'pause', request.command === 'pause'])
+    } else if (request.command === 'next' || request.command === 'previous') {
+      const nextIndex = request.command === 'next' ? session.currentIndex + 1 : session.currentIndex - 1
+      if (nextIndex >= 0 && nextIndex < session.queue.length) {
+        await finalizeEntry(session, 'skip', true)
+        session.loadingNext = true
+        session.transitioning = true
+        try {
+          const stopped = session.ipc.waitForEvent((message) => message.event === 'end-file')
+          await session.ipc.send(['stop'])
+          await stopped
+        } finally {
+          session.loadingNext = false
+          session.transitioning = false
+        }
+        await loadEntry(session, nextIndex)
+      }
     }
+  } catch (error) {
+    session.phase = 'error'
+    session.syncError = error instanceof Error ? error.message : '播放控制失败'
+    emitPlayback('error', session, session.syncError)
   }
   return lastSnapshot
 }
 
 function registerIpc(): void {
   ipcMain.handle('settings:get', () => publicSettings())
-  ipcMain.handle('settings:save', (_event, input: { serverUrl: string; username: string; mpvPath: string; continuousPlayback?: boolean; preferChineseSubtitles?: boolean }) => {
+  ipcMain.handle('settings:save', (_event, input: { serverUrl: string; username: string; mpvPath: string }) => {
     const nextUrl = normalizeServerUrl(input.serverUrl)
     if (nextUrl !== storedSettings.serverUrl) embyClient = null
     storedSettings.serverUrl = nextUrl
     storedSettings.username = input.username.trim()
     storedSettings.mpvPath = input.mpvPath.trim() || 'mpv.exe'
-    storedSettings.continuousPlayback = input.continuousPlayback !== false
-    storedSettings.preferChineseSubtitles = input.preferChineseSubtitles !== false
     persistSettings()
     return publicSettings()
   })
-  ipcMain.handle('emby:login', async (_event, input: { serverUrl: string; username: string; password: string; mpvPath: string; continuousPlayback?: boolean; preferChineseSubtitles?: boolean }) => {
+  ipcMain.handle('emby:login', async (_event, input: { serverUrl: string; username: string; password: string; mpvPath: string }) => {
     const serverUrl = normalizeServerUrl(input.serverUrl)
     const result = await EmbyClient.authenticate(serverUrl, input.username.trim(), input.password)
     storedSettings.serverUrl = serverUrl
     storedSettings.username = input.username.trim()
     storedSettings.userId = result.User.Id
     storedSettings.mpvPath = input.mpvPath.trim() || 'mpv.exe'
-    storedSettings.continuousPlayback = input.continuousPlayback !== false
-    storedSettings.preferChineseSubtitles = input.preferChineseSubtitles !== false
     storedSettings.encryptedToken = safeStorage.isEncryptionAvailable()
       ? safeStorage.encryptString(result.AccessToken).toString('base64')
       : undefined

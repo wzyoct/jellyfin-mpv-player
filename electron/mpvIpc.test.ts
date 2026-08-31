@@ -1,5 +1,7 @@
+import net from 'node:net'
+import { randomUUID } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
-import { consumeJsonLines } from './mpvIpc'
+import { consumeJsonLines, MpvIpc } from './mpvIpc'
 
 describe('consumeJsonLines', () => {
   it('keeps incomplete JSON until the next chunk', () => {
@@ -37,5 +39,25 @@ describe('consumeJsonLines', () => {
     ].join('\n') + '\n')
     expect(parsed.messages.map((message) => message.reason)).toEqual(['eof', 'quit', 'error'])
     expect(parsed.messages[2].file_error).toBe('not found')
+  })
+
+  it('waits for a fake MPV file-loaded event after connecting', async () => {
+    const pipeName = `\\\\.\\pipe\\ember-test-${randomUUID()}`
+    const server = net.createServer((socket) => {
+      setTimeout(() => socket.write('{"event":"file-loaded"}\n'), 25)
+    })
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject)
+      server.listen(pipeName, resolve)
+    })
+
+    const ipc = new MpvIpc(pipeName)
+    try {
+      await ipc.connectWithRetry()
+      await expect(ipc.waitForEvent((message) => message.event === 'file-loaded', 1000)).resolves.toMatchObject({ event: 'file-loaded' })
+    } finally {
+      ipc.close()
+      await new Promise<void>((resolve) => server.close(() => resolve()))
+    }
   })
 })
