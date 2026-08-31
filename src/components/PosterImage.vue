@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { Film, ImageOff } from 'lucide-vue-next'
+import { resolvePosterSource, type PosterSource } from '../posterSource'
 import type { EmbyItem } from '../types'
 
 const props = withDefaults(defineProps<{
   item: EmbyItem
   variant?: 'poster' | 'backdrop'
   eager?: boolean
+  source?: PosterSource
 }>(), {
   variant: 'poster',
   eager: false,
@@ -24,16 +26,17 @@ async function loadImage(): Promise<void> {
   loading.value = true
   imageUrl.value = ''
   const imageType = props.variant === 'backdrop' ? 'Backdrop' : 'Primary'
-  const tag = props.variant === 'backdrop'
-    ? props.item.BackdropImageTags?.[0]
-    : props.item.ImageTags?.Primary
+  const source = props.variant === 'backdrop'
+    ? { itemId: props.item.Id, tag: props.item.BackdropImageTags?.[0] }
+    : props.source || resolvePosterSource(props.item)
+  const tag = source.tag
   if (!tag) {
     loading.value = false
     return
   }
   try {
     const nextImageUrl = await window.emby.getImage({
-      itemId: props.item.Id,
+      itemId: source.itemId,
       imageType,
       tag,
       maxWidth: props.variant === 'backdrop' ? 1280 : 480,
@@ -78,7 +81,14 @@ onMounted(() => {
 })
 
 onUnmounted(() => observer?.disconnect())
-watch(() => [props.item.Id, props.variant, props.item.ImageTags?.Primary, props.item.BackdropImageTags?.[0]], resetImage)
+watch(() => [
+  props.item.Id,
+  props.variant,
+  props.item.ImageTags?.Primary,
+  props.item.BackdropImageTags?.[0],
+  props.source?.itemId,
+  props.source?.tag,
+], resetImage)
 </script>
 
 <template>

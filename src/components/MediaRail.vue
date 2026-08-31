@@ -2,6 +2,7 @@
 import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ChevronLeft, ChevronRight, LoaderCircle } from 'lucide-vue-next'
 import MediaCard from './MediaCard.vue'
+import type { PosterMode } from '../posterSource'
 import type { EmbyItem } from '../types'
 
 const props = withDefaults(defineProps<{
@@ -11,11 +12,13 @@ const props = withDefaults(defineProps<{
   loading?: boolean
   showProgress?: boolean
   emptyLabel?: string
+  posterMode?: PosterMode
 }>(), {
   count: undefined,
   loading: false,
   showProgress: true,
   emptyLabel: '暂无内容',
+  posterMode: 'item',
 })
 
 defineEmits<{
@@ -107,6 +110,7 @@ watch(() => props.items, () => nextTick(updateScrollState), { deep: true })
         :key="item.Id"
         :item="item"
         :show-progress="showProgress"
+        :poster-mode="posterMode"
         :eager="index < 4"
         @select="$emit('select', $event)"
       />

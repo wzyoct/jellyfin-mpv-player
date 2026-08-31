@@ -770,7 +770,7 @@ onUnmounted(() => {
         <div v-if="homeLoading && !heroItem" class="loading-state"><LoaderCircle class="spin" :size="24" />正在加载媒体库</div>
         <div v-else-if="!homeLoading && !homeError && !heroItem" class="empty-state home-empty-state"><Clapperboard :size="32" /><h3>还没有可展示的内容</h3><p>请确认 Emby 媒体库已完成扫描，并检查当前账号权限。</p><button class="button button--ghost" type="button" @click="loadHome"><RefreshCw :size="16" />重新加载</button></div>
 
-        <MediaRail v-if="continueItems.length" title="继续观看" :items="continueItems" @select="openDetails" />
+        <MediaRail v-if="continueItems.length" title="继续观看" :items="continueItems" poster-mode="series" @select="openDetails" />
         <MediaRail v-if="latestItems.length" title="最近加入" :items="latestItems" :show-progress="false" @select="openDetails" />
 
         <section v-if="homeAllItems.length" class="library-shelves">

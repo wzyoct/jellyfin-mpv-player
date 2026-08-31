@@ -37,6 +37,7 @@ export interface EmbyItem {
   ParentIndexNumber?: number
   SeriesName?: string
   SeriesId?: string
+  SeriesPrimaryImageTag?: string
   ImageTags?: Record<string, string>
   BackdropImageTags?: string[]
   UserData?: UserData

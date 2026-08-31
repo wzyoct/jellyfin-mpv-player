@@ -95,7 +95,7 @@ kbd { padding: 2px 5px; border: 1px solid #414249; border-radius: 4px; color: #7
 .poster-row::-webkit-scrollbar { display: none; }
 .poster-row:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 4px; }
 .rail-loading, .rail-empty { display: flex; align-items: center; gap: 8px; min-height: 190px; color: #73757b; font-size: 12px; }
-.poster-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(164px, 220px)); justify-content: start; gap: 27px 18px; }
+.poster-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(clamp(164px, 10vw, 220px), 1fr)); gap: 27px 18px; }
 .poster-card { position: relative; min-width: 0; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; }
 .poster-card:hover .poster-image { transform: translateY(-5px); box-shadow: 0 14px 24px rgba(0,0,0,.34); }
 .poster-card:focus-visible, .button:focus-visible, .nav-item:focus-visible, .icon-button:focus-visible, .search-result:focus-visible, .rail-arrow:focus-visible, .hero-arrow:focus-visible, .hero-dot:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 3px; }
