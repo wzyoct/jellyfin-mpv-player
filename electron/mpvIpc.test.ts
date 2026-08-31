@@ -28,4 +28,14 @@ describe('consumeJsonLines', () => {
     const parsed = consumeJsonLines('', 'not-json\n{"event":"end-file"}\n')
     expect(parsed.messages).toEqual([{ event: 'end-file' }])
   })
+
+  it('preserves MPV end-file reasons used by the playback session', () => {
+    const parsed = consumeJsonLines('', [
+      '{"event":"end-file","reason":"eof"}',
+      '{"event":"end-file","reason":"quit"}',
+      '{"event":"end-file","reason":"error","file_error":"not found"}',
+    ].join('\n') + '\n')
+    expect(parsed.messages.map((message) => message.reason)).toEqual(['eof', 'quit', 'error'])
+    expect(parsed.messages[2].file_error).toBe('not found')
+  })
 })
