@@ -2,6 +2,7 @@
 import { computed } from 'vue'
 import PosterImage from './PosterImage.vue'
 import { resolvePosterSource, type PosterMode } from '../posterSource'
+import { mediaPresentation } from '../mediaPresentation'
 import type { EmbyItem } from '../types'
 
 const props = withDefaults(defineProps<{
@@ -25,21 +26,24 @@ const progress = computed(() => {
   return Math.min(100, Math.round((position / props.item.RunTimeTicks) * 100))
 })
 
-const subtitle = computed(() => {
-  if (props.item.SeriesName) return props.item.SeriesName
-  if (props.item.ProductionYear) return String(props.item.ProductionYear)
-  if (props.item.Type === 'Movie') return '电影'
-  if (props.item.Type === 'Series') return '剧集'
-  return props.item.Type
-})
-
 const posterSource = computed(() => resolvePosterSource(props.item, props.posterMode))
+const presentation = computed(() => mediaPresentation(props.item))
 </script>
 
 <template>
-  <button class="poster-card" type="button" :aria-label="`打开 ${item.Name}`" @click="$emit('select', item)">
+  <button class="poster-card" type="button" :aria-label="presentation.ariaLabel" @click="$emit('select', item)">
+    <span class="poster-art">
       <PosterImage :item="item" :source="posterSource" :eager="eager" />
-    <span v-if="showProgress && progress" class="poster-progress"><span :style="{ width: `${progress}%` }"></span></span>
-    <span class="poster-info"><strong>{{ item.Name }}</strong><small>{{ subtitle }}</small></span>
+      <span
+        v-if="showProgress && progress"
+        class="poster-progress"
+        role="progressbar"
+        aria-label="观看进度"
+        :aria-valuenow="progress"
+        aria-valuemin="0"
+        aria-valuemax="100"
+      ><span :style="{ width: `${progress}%` }"></span></span>
+    </span>
+    <span class="poster-info"><strong>{{ presentation.title }}</strong><small>{{ presentation.subtitle }}</small></span>
   </button>
 </template>

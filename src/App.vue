@@ -26,6 +26,7 @@ import MediaCard from './components/MediaCard.vue'
 import MediaRail from './components/MediaRail.vue'
 import packageInfo from '../package.json'
 import releaseNotesData from './data/release-notes.json'
+import { contextualItemLabel, itemTypeLabel, mediaPresentation } from './mediaPresentation'
 import { chooseDefaultSubtitle, isExternalSubtitle, isChineseSubtitle } from './subtitlePreference'
 import type {
   EmbyItem,
@@ -80,6 +81,7 @@ const libraryError = ref('')
 const notice = ref<{ message: string; kind: 'success' | 'error' } | null>(null)
 const currentPlaybackId = ref('')
 const currentPlaybackPosition = ref(0)
+const lastPlaybackSyncError = ref('')
 const searchInput = ref<HTMLInputElement | null>(null)
 const pageScroll = ref<HTMLElement | null>(null)
 let searchTimer: ReturnType<typeof setTimeout> | undefined
@@ -88,6 +90,7 @@ let removeMpvListener: (() => void) | undefined
 let homeRequestId = 0
 let libraryRequestId = 0
 let searchRequestId = 0
+let detailRequestId = 0
 let heroTimer: ReturnType<typeof setInterval> | undefined
 
 const form = reactive({
@@ -115,8 +118,15 @@ const audioStreams = computed(() => mediaStreams.value.filter((stream) => stream
 const subtitleStreams = computed(() => mediaStreams.value.filter((stream) => stream.Type === 'Subtitle'))
 const selectedSubtitleStream = computed(() => subtitleStreams.value.find((stream) => stream.Index === selectedSubtitle.value))
 const currentPlaybackItem = computed(() => {
-  const all = [...libraryItems.value, ...latestItems.value, ...searchResults.value]
+  const all = [...libraryItems.value, ...latestItems.value, ...continueItems.value, ...searchResults.value]
   return all.find((item) => item.Id === currentPlaybackId.value)
+})
+const currentPlaybackLabel = computed(() => {
+  const item = currentPlaybackItem.value
+  if (!item) return 'MPV'
+  return item.Type === 'Episode' && item.SeriesName
+    ? `${item.SeriesName} · ${mediaPresentation(item).title}`
+    : item.Name
 })
 
 function formatRuntime(ticks?: number): string {
@@ -125,14 +135,6 @@ function formatRuntime(ticks?: number): string {
   const hours = Math.floor(totalMinutes / 60)
   const minutes = totalMinutes % 60
   return hours ? `${hours} 小时 ${minutes} 分钟` : `${minutes} 分钟`
-}
-
-function itemTypeLabel(item: EmbyItem): string {
-  if (item.Type === 'Movie') return '电影'
-  if (item.Type === 'Series') return '剧集'
-  if (item.Type === 'Season') return `第 ${item.IndexNumber || 1} 季`
-  if (item.Type === 'Episode') return `第 ${item.ParentIndexNumber || 1} 季 · 第 ${item.IndexNumber || 1} 集`
-  return item.Type
 }
 
 function streamLabel(stream: MediaStream, kind: 'audio' | 'subtitle'): string {
@@ -282,6 +284,22 @@ async function loadHome(): Promise<void> {
     }
   } finally {
     if (requestId === homeRequestId) homeLoading.value = false
+  }
+}
+
+async function refreshContinueItems(): Promise<void> {
+  if (!isConnected.value) return
+  try {
+    const continued = await loadAllItems({
+      recursive: true,
+      includeItemTypes: 'Movie,Episode',
+      filters: 'IsResumable',
+      sortBy: 'DatePlayed',
+      sortOrder: 'Descending',
+    })
+    continueItems.value = uniqueItems(continued)
+  } catch (error) {
+    showNotice(error instanceof Error ? `继续观看刷新失败：${error.message}` : '继续观看刷新失败', 'error')
   }
 }
 
@@ -463,6 +481,7 @@ async function loadPlayableDetails(item: EmbyItem): Promise<void> {
 }
 
 async function openDetails(item: EmbyItem): Promise<void> {
+  const requestId = ++detailRequestId
   selectedItem.value = item
   playbackInfo.value = null
   seasonItems.value = []
@@ -472,23 +491,28 @@ async function openDetails(item: EmbyItem): Promise<void> {
   isDetailLoading.value = true
   try {
     const detailed = await window.emby.getItem(item.Id)
+    if (requestId !== detailRequestId) return
     selectedItem.value = detailed
     if (detailed.Type === 'Series') {
-      seasonItems.value = (await window.emby.getItems({
+      const seasons = await window.emby.getItems({
         parentId: detailed.Id,
         recursive: false,
         includeItemTypes: 'Season',
         sortBy: 'IndexNumber',
         limit: 100,
-      })).Items
+      })
+      if (requestId !== detailRequestId) return
+      seasonItems.value = seasons.Items
     } else if (detailed.Type === 'Season') {
-      episodeItems.value = (await window.emby.getItems({
+      const episodes = await window.emby.getItems({
         parentId: detailed.Id,
         recursive: false,
         includeItemTypes: 'Episode',
         sortBy: 'IndexNumber',
         limit: 100,
-      })).Items
+      })
+      if (requestId !== detailRequestId) return
+      episodeItems.value = episodes.Items
     } else {
       await loadPlayableDetails(detailed)
     }
@@ -500,6 +524,7 @@ async function openDetails(item: EmbyItem): Promise<void> {
 }
 
 function closeDetails(): void {
+  detailRequestId += 1
   selectedItem.value = null
   playbackInfo.value = null
   seasonItems.value = []
@@ -538,10 +563,23 @@ async function stopPlayback(): Promise<void> {
 function handleMpvStatus(status: MpvStatus): void {
   if (status.type === 'started') {
     currentPlaybackId.value = status.itemId || ''
+    currentPlaybackPosition.value = 0
   } else if (status.type === 'progress') {
+    if (status.itemId) currentPlaybackId.value = status.itemId
     currentPlaybackPosition.value = status.positionTicks || 0
+    lastPlaybackSyncError.value = ''
   } else if (status.type === 'stopped') {
+    if (status.positionTicks !== undefined) currentPlaybackPosition.value = status.positionTicks
     currentPlaybackId.value = ''
+    if (status.syncError) showNotice(`播放已结束，但进度未同步：${status.syncError}`, 'error')
+    lastPlaybackSyncError.value = ''
+    void refreshContinueItems()
+  } else if (status.type === 'sync-error') {
+    const message = status.message || '播放进度同步失败'
+    if (message !== lastPlaybackSyncError.value) {
+      lastPlaybackSyncError.value = message
+      showNotice(message, 'error')
+    }
   } else if (status.type === 'error') {
     currentPlaybackId.value = ''
     showNotice(status.message || 'MPV 播放失败', 'error')
@@ -812,7 +850,7 @@ onUnmounted(() => {
         <div v-else class="search-results">
           <button v-for="item in searchResults" :key="item.Id" class="search-result" type="button" @click="openDetails(item)">
             <div class="search-result-art"><PosterImage :item="item" /></div>
-            <span><strong>{{ item.Name }}</strong><small>{{ item.ProductionYear || '' }} · {{ itemTypeLabel(item) }}</small></span>
+            <span><strong>{{ mediaPresentation(item).title }}</strong><small>{{ mediaPresentation(item).subtitle }}</small></span>
             <ChevronRight :size="16" />
           </button>
         </div>
@@ -820,36 +858,42 @@ onUnmounted(() => {
     </div>
 
     <div v-if="currentPlaybackId" class="playback-bar">
-      <div class="playback-bar-copy"><span class="playing-dot"></span><span>正在播放</span><strong>{{ currentPlaybackItem?.Name || 'MPV' }}</strong></div>
+      <div class="playback-bar-copy"><span class="playing-dot"></span><span>正在播放</span><strong>{{ currentPlaybackLabel }}</strong></div>
       <span class="playback-time">{{ Math.round(currentPlaybackPosition / 10_000_000 / 60) }} 分钟</span>
       <button class="icon-button icon-button--small" type="button" title="停止播放并同步进度" @click="stopPlayback"><X :size="16" /></button>
     </div>
 
     <div v-if="notice" class="toast" :class="`toast--${notice.kind}`"><Check v-if="notice.kind === 'success'" :size="17" /><AlertCircle v-else :size="17" />{{ notice.message }}</div>
 
-    <div v-if="selectedItem" class="modal-backdrop" @click.self="closeDetails">
-      <section class="detail-modal" role="dialog" aria-modal="true" :aria-label="selectedItem.Name">
-        <button class="modal-close icon-button" type="button" title="关闭详情" @click="closeDetails"><X :size="20" /></button>
-        <div class="detail-art"><PosterImage :item="selectedItem" variant="backdrop" eager /><div class="detail-art-fade"></div></div>
-        <div class="detail-body">
-          <p class="eyebrow">{{ itemTypeLabel(selectedItem) }}</p>
-          <h2>{{ selectedItem.Name }}</h2>
-          <div class="detail-meta"><span v-if="selectedItem.ProductionYear">{{ selectedItem.ProductionYear }}</span><span v-if="selectedItem.OfficialRating">{{ selectedItem.OfficialRating }}</span><span v-if="selectedItem.RunTimeTicks">{{ formatRuntime(selectedItem.RunTimeTicks) }}</span><span v-if="selectedItem.CommunityRating">评分 {{ selectedItem.CommunityRating.toFixed(1) }}</span></div>
-          <p class="detail-overview">{{ selectedItem.Overview || '暂无简介。' }}</p>
+    <Transition name="modal" appear>
+      <div v-if="selectedItem" class="modal-backdrop" @click.self="closeDetails">
+        <section class="detail-modal" role="dialog" aria-modal="true" :aria-label="selectedItem.Name">
+          <button class="modal-close icon-button" type="button" title="关闭详情" @click="closeDetails"><X :size="20" /></button>
+          <Transition name="detail-content" mode="out-in">
+            <div :key="selectedItem.Id">
+              <div class="detail-art"><PosterImage :item="selectedItem" variant="backdrop" eager /><div class="detail-art-fade"></div></div>
+              <div class="detail-body">
+                <p class="eyebrow">{{ contextualItemLabel(selectedItem) }}</p>
+                <h2>{{ selectedItem.Name }}</h2>
+                <div class="detail-meta"><span v-if="selectedItem.ProductionYear">{{ selectedItem.ProductionYear }}</span><span v-if="selectedItem.OfficialRating">{{ selectedItem.OfficialRating }}</span><span v-if="selectedItem.RunTimeTicks">{{ formatRuntime(selectedItem.RunTimeTicks) }}</span><span v-if="selectedItem.CommunityRating">评分 {{ selectedItem.CommunityRating.toFixed(1) }}</span></div>
+                <p class="detail-overview">{{ selectedItem.Overview || '暂无简介。' }}</p>
 
-          <div v-if="seasonItems.length" class="detail-subsection"><h3>选择季度</h3><div class="season-list"><button v-for="season in seasonItems" :key="season.Id" class="season-button" type="button" @click="openDetails(season)"><PosterImage :item="season" /><span>{{ season.Name }}</span><ChevronRight :size="16" /></button></div></div>
-          <div v-if="episodeItems.length" class="detail-subsection"><h3>分集</h3><div class="episode-list"><button v-for="episode in episodeItems" :key="episode.Id" class="episode-button" type="button" @click="openDetails(episode)"><span class="episode-number">{{ String(episode.IndexNumber || 0).padStart(2, '0') }}</span><span><strong>{{ episode.Name }}</strong><small>{{ formatRuntime(episode.RunTimeTicks) }}</small></span><ChevronRight :size="16" /></button></div></div>
+                <div v-if="seasonItems.length" class="detail-subsection"><h3>选择季度</h3><div class="season-list"><button v-for="season in seasonItems" :key="season.Id" class="season-button" type="button" @click="openDetails(season)"><PosterImage :item="season" /><span>{{ season.Name }}</span><ChevronRight :size="16" /></button></div></div>
+                <div v-if="episodeItems.length" class="detail-subsection"><h3>分集</h3><div class="episode-list"><button v-for="episode in episodeItems" :key="episode.Id" class="episode-button" type="button" @click="openDetails(episode)"><span class="episode-number">{{ episode.IndexNumber === undefined ? '--' : String(episode.IndexNumber).padStart(2, '0') }}</span><span><strong>{{ episode.Name }}</strong><small>{{ formatRuntime(episode.RunTimeTicks) }}</small></span><ChevronRight :size="16" /></button></div></div>
 
-          <div v-if="selectedItem.Type === 'Movie' || selectedItem.Type === 'Episode'" class="detail-actions">
-            <div v-if="isDetailLoading" class="loading-inline"><LoaderCircle class="spin" :size="18" />读取播放选项</div>
-            <template v-else>
-              <label v-if="audioStreams.length" class="track-select"><Volume2 :size="16" /><select v-model="selectedAudio" aria-label="选择音轨"><option :value="undefined">默认音轨</option><option v-for="stream in audioStreams" :key="stream.Index" :value="stream.Index">{{ streamLabel(stream, 'audio') }}</option></select></label>
-              <label v-if="subtitleStreams.length" class="track-select"><Menu :size="16" /><select v-model="selectedSubtitle" aria-label="选择字幕"><option :value="undefined">关闭字幕</option><option v-for="stream in subtitleStreams" :key="stream.Index" :value="stream.Index">{{ streamLabel(stream, 'subtitle') }}{{ stream.Index === selectedSubtitleStream?.Index ? '（当前）' : '' }}</option></select></label>
-              <button class="button button--primary button--large" type="button" :disabled="isDetailLoading" @click="playSelected"><Play :size="18" fill="currentColor" />{{ resumePosition(selectedItem) ? '继续播放' : '播放' }}</button>
-            </template>
-          </div>
-        </div>
-      </section>
-    </div>
+                <div v-if="selectedItem.Type === 'Movie' || selectedItem.Type === 'Episode'" class="detail-actions">
+                  <div v-if="isDetailLoading" class="loading-inline"><LoaderCircle class="spin" :size="18" />读取播放选项</div>
+                  <template v-else>
+                    <label v-if="audioStreams.length" class="track-select"><Volume2 :size="16" /><select v-model="selectedAudio" aria-label="选择音轨"><option :value="undefined">默认音轨</option><option v-for="stream in audioStreams" :key="stream.Index" :value="stream.Index">{{ streamLabel(stream, 'audio') }}</option></select></label>
+                    <label v-if="subtitleStreams.length" class="track-select"><Menu :size="16" /><select v-model="selectedSubtitle" aria-label="选择字幕"><option :value="undefined">关闭字幕</option><option v-for="stream in subtitleStreams" :key="stream.Index" :value="stream.Index">{{ streamLabel(stream, 'subtitle') }}{{ stream.Index === selectedSubtitleStream?.Index ? '（当前）' : '' }}</option></select></label>
+                    <button class="button button--primary button--large" type="button" :disabled="isDetailLoading" @click="playSelected"><Play :size="18" fill="currentColor" />{{ resumePosition(selectedItem) ? '继续播放' : '播放' }}</button>
+                  </template>
+                </div>
+              </div>
+            </div>
+          </Transition>
+        </section>
+      </div>
+    </Transition>
   </div>
 </template>

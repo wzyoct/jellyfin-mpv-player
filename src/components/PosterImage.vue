@@ -92,7 +92,7 @@ watch(() => [
 </script>
 
 <template>
-  <div ref="imageRoot" class="poster-image" :class="[`poster-image--${variant}`, { 'is-loading': loading }]">
+  <div ref="imageRoot" class="poster-image" :class="[`poster-image--${variant}`, { 'is-loading': loading, 'has-image': imageUrl }]">
     <img v-if="imageUrl" :src="imageUrl" :alt="item.Name" @load="loading = false" @error="imageUrl = ''; loading = false" />
     <div v-else class="poster-placeholder">
       <ImageOff v-if="!loading" :size="variant === 'backdrop' ? 32 : 24" stroke-width="1.4" />
