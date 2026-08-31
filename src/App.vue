@@ -13,10 +13,14 @@ import {
   LogIn,
   LogOut,
   Menu,
+  Pause,
   Play,
   RefreshCw,
   Search,
+  SkipBack,
+  SkipForward,
   Settings2,
+  Square,
   Tv,
   Volume2,
   X,
@@ -32,9 +36,11 @@ import type {
   EmbyItem,
   EmbyView,
   MediaStream,
-  MpvStatus,
   PlaybackInfo,
+  PlaybackEvent,
+  PlaybackSnapshot,
   PublicSettings,
+  MpvValidationResult,
   ItemsQuery,
   ReleaseNote,
 } from './types'
@@ -60,6 +66,7 @@ const homeShowItems = ref<EmbyItem[]>([])
 const latestItems = ref<EmbyItem[]>([])
 const recommendationItems = ref<EmbyItem[]>([])
 const continueItems = ref<EmbyItem[]>([])
+const nextUpItems = ref<EmbyItem[]>([])
 const searchResults = ref<EmbyItem[]>([])
 const searchTerm = ref('')
 const searchLoading = ref(false)
@@ -82,11 +89,14 @@ const notice = ref<{ message: string; kind: 'success' | 'error' } | null>(null)
 const currentPlaybackId = ref('')
 const currentPlaybackPosition = ref(0)
 const lastPlaybackSyncError = ref('')
+const playbackSnapshot = ref<PlaybackSnapshot>({ revision: 0, phase: 'idle', queue: [], currentIndex: -1, positionTicks: 0 })
+const mpvValidation = ref<MpvValidationResult | null>(null)
 const searchInput = ref<HTMLInputElement | null>(null)
 const pageScroll = ref<HTMLElement | null>(null)
 let searchTimer: ReturnType<typeof setTimeout> | undefined
 let noticeTimer: ReturnType<typeof setTimeout> | undefined
-let removeMpvListener: (() => void) | undefined
+let removePlaybackListener: (() => void) | undefined
+let focusRefreshTimer: ReturnType<typeof setTimeout> | undefined
 let homeRequestId = 0
 let libraryRequestId = 0
 let searchRequestId = 0
@@ -98,6 +108,8 @@ const form = reactive({
   username: '',
   password: '',
   mpvPath: 'mpv.exe',
+  continuousPlayback: true,
+  preferChineseSubtitles: true,
 })
 
 const isConnected = computed(() => Boolean(settings.value?.connected))
@@ -118,8 +130,18 @@ const audioStreams = computed(() => mediaStreams.value.filter((stream) => stream
 const subtitleStreams = computed(() => mediaStreams.value.filter((stream) => stream.Type === 'Subtitle'))
 const selectedSubtitleStream = computed(() => subtitleStreams.value.find((stream) => stream.Index === selectedSubtitle.value))
 const currentPlaybackItem = computed(() => {
-  const all = [...libraryItems.value, ...latestItems.value, ...continueItems.value, ...searchResults.value]
+  const all = [...libraryItems.value, ...latestItems.value, ...continueItems.value, ...nextUpItems.value, ...homeAllItems.value, ...searchResults.value]
   return all.find((item) => item.Id === currentPlaybackId.value)
+})
+const playbackPhaseLabel = computed(() => {
+  switch (playbackSnapshot.value.phase) {
+    case 'preparing': return '准备播放'
+    case 'switching': return '切换剧集'
+    case 'paused': return '已暂停'
+    case 'stopping': return '正在停止'
+    case 'error': return '播放错误'
+    default: return '正在播放'
+  }
 })
 const currentPlaybackLabel = computed(() => {
   const item = currentPlaybackItem.value
@@ -160,6 +182,8 @@ function applySettings(next: PublicSettings): void {
   form.serverUrl = next.serverUrl
   form.username = next.username
   form.mpvPath = next.mpvPath || 'mpv.exe'
+  form.continuousPlayback = next.continuousPlayback
+  form.preferChineseSubtitles = next.preferChineseSubtitles
 }
 
 function viewSupportsFilter(view: EmbyView, filter: LibraryFilter): boolean {
@@ -240,7 +264,7 @@ async function loadHome(): Promise<void> {
       activeViewId.value = views.value[0]?.Id || ''
     }
     recommendationError.value = ''
-    const [recommendations, latest, continued, allItems] = await Promise.all([
+    const [recommendations, latest, continued, nextUp, allItems] = await Promise.all([
       window.emby.getMovieRecommendations().catch((error: unknown) => {
         recommendationError.value = error instanceof Error ? error.message : '读取电影推荐失败'
         return []
@@ -259,6 +283,7 @@ async function loadHome(): Promise<void> {
         sortBy: 'DatePlayed',
         sortOrder: 'Descending',
       }),
+      window.emby.getNextUp().catch(() => ({ Items: [], TotalRecordCount: 0 })),
       loadAllItems({
         recursive: true,
         includeItemTypes: 'Movie,Series',
@@ -272,6 +297,7 @@ async function loadHome(): Promise<void> {
       .filter((item) => item.Type === 'Movie')
       .slice(0, 8)
     continueItems.value = uniqueItems(continued)
+    nextUpItems.value = uniqueItems(nextUp.Items || []).slice(0, 24)
     homeAllItems.value = uniqueItems(allItems)
     homeMovieItems.value = homeAllItems.value.filter((item) => item.Type === 'Movie')
     homeShowItems.value = homeAllItems.value.filter((item) => item.Type === 'Series')
@@ -298,6 +324,8 @@ async function refreshContinueItems(): Promise<void> {
       sortOrder: 'Descending',
     })
     continueItems.value = uniqueItems(continued)
+    const nextUp = await window.emby.getNextUp().catch(() => ({ Items: [], TotalRecordCount: 0 }))
+    nextUpItems.value = uniqueItems(nextUp.Items || []).slice(0, 24)
   } catch (error) {
     showNotice(error instanceof Error ? `继续观看刷新失败：${error.message}` : '继续观看刷新失败', 'error')
   }
@@ -368,6 +396,8 @@ async function submitConnection(): Promise<void> {
         serverUrl: form.serverUrl,
         username: form.username,
         mpvPath: form.mpvPath,
+        continuousPlayback: form.continuousPlayback,
+        preferChineseSubtitles: form.preferChineseSubtitles,
       }))
       showNotice('设置已保存')
     } catch (error) {
@@ -386,6 +416,8 @@ async function submitConnection(): Promise<void> {
       username: form.username,
       password: form.password,
       mpvPath: form.mpvPath,
+      continuousPlayback: form.continuousPlayback,
+      preferChineseSubtitles: form.preferChineseSubtitles,
     })
     applySettings(result.settings)
     form.password = ''
@@ -410,11 +442,24 @@ async function disconnect(): Promise<void> {
     latestItems.value = []
     recommendationItems.value = []
     continueItems.value = []
+    nextUpItems.value = []
     stopHeroAutoPlay()
     activePage.value = 'settings'
     showNotice('已断开 Emby 连接')
   } catch (error) {
     showNotice(error instanceof Error ? error.message : '断开连接失败', 'error')
+  }
+}
+
+async function validateMpv(test = false): Promise<void> {
+  try {
+    mpvValidation.value = test
+      ? await window.emby.testMpvPath(form.mpvPath)
+      : await window.emby.validateMpvPath(form.mpvPath)
+    showNotice(mpvValidation.value.message, mpvValidation.value.valid ? 'success' : 'error')
+  } catch (error) {
+    mpvValidation.value = { valid: false, path: form.mpvPath, message: error instanceof Error ? error.message : 'MPV 检测失败' }
+    showNotice(mpvValidation.value.message, 'error')
   }
 }
 
@@ -541,13 +586,15 @@ async function playSelected(): Promise<void> {
   const item = selectedItem.value
   if (!item || (item.Type !== 'Movie' && item.Type !== 'Episode')) return
   try {
-    await window.emby.play({
+    const snapshot = await window.emby.playbackStart({
       itemId: item.Id,
+      mode: item.Type === 'Episode' && form.continuousPlayback ? 'series' : 'single',
       mediaSourceId: selectedSource.value?.Id,
-      audioStreamIndex: selectedAudio.value,
-      subtitleStreamIndex: selectedSubtitle.value,
       startTimeTicks: resumePosition(item),
+      audioPreference: { index: selectedAudio.value },
+      subtitlePreference: { index: selectedSubtitle.value, chinesePreferred: form.preferChineseSubtitles },
     })
+    handlePlaybackSnapshot(snapshot)
     closeDetails()
     showNotice(`正在用 MPV 播放《${item.Name}》`)
   } catch (error) {
@@ -555,35 +602,120 @@ async function playSelected(): Promise<void> {
   }
 }
 
-async function stopPlayback(): Promise<void> {
-  await window.emby.stop()
-  currentPlaybackId.value = ''
+async function playItemDirect(item: EmbyItem): Promise<void> {
+  try {
+    const snapshot = await window.emby.playbackStart({
+      itemId: item.Id,
+      mode: item.Type === 'Episode' && form.continuousPlayback ? 'series' : 'single',
+      startTimeTicks: resumePosition(item),
+      subtitlePreference: { chinesePreferred: form.preferChineseSubtitles },
+    })
+    handlePlaybackSnapshot(snapshot)
+    showNotice(`正在用 MPV 播放《${item.Name}》`)
+  } catch (error) {
+    showNotice(error instanceof Error ? error.message : '启动 MPV 失败', 'error')
+  }
 }
 
-function handleMpvStatus(status: MpvStatus): void {
-  if (status.type === 'started') {
-    currentPlaybackId.value = status.itemId || ''
-    currentPlaybackPosition.value = 0
-  } else if (status.type === 'progress') {
-    if (status.itemId) currentPlaybackId.value = status.itemId
-    currentPlaybackPosition.value = status.positionTicks || 0
-    lastPlaybackSyncError.value = ''
-  } else if (status.type === 'stopped') {
-    if (status.positionTicks !== undefined) currentPlaybackPosition.value = status.positionTicks
-    currentPlaybackId.value = ''
-    if (status.syncError) showNotice(`播放已结束，但进度未同步：${status.syncError}`, 'error')
-    lastPlaybackSyncError.value = ''
-    void refreshContinueItems()
-  } else if (status.type === 'sync-error') {
-    const message = status.message || '播放进度同步失败'
-    if (message !== lastPlaybackSyncError.value) {
-      lastPlaybackSyncError.value = message
-      showNotice(message, 'error')
-    }
-  } else if (status.type === 'error') {
-    currentPlaybackId.value = ''
-    showNotice(status.message || 'MPV 播放失败', 'error')
+async function stopPlayback(): Promise<void> {
+  const sessionId = playbackSnapshot.value.sessionId
+  if (!sessionId) return
+  try {
+    handlePlaybackSnapshot(await window.emby.playbackCommand({ sessionId, command: 'stop' }))
+  } catch (error) {
+    showNotice(error instanceof Error ? error.message : '停止播放失败', 'error')
   }
+}
+
+function handlePlaybackSnapshot(snapshot: PlaybackSnapshot): void {
+  if (snapshot.revision < playbackSnapshot.value.revision) return
+  playbackSnapshot.value = snapshot
+  currentPlaybackId.value = snapshot.phase === 'stopped' || snapshot.phase === 'idle' ? '' : (snapshot.currentItemId || '')
+  currentPlaybackPosition.value = snapshot.positionTicks || 0
+  if (snapshot.syncError && snapshot.syncError !== lastPlaybackSyncError.value) {
+    lastPlaybackSyncError.value = snapshot.syncError
+    showNotice(`播放进度同步失败：${snapshot.syncError}`, 'error')
+  } else if (!snapshot.syncError) {
+    lastPlaybackSyncError.value = ''
+  }
+  if (snapshot.phase === 'error' && snapshot.message) showNotice(snapshot.message, 'error')
+}
+
+async function refreshPlaybackData(snapshot: PlaybackSnapshot): Promise<void> {
+  const itemId = snapshot.currentItemId || snapshot.queue[snapshot.currentIndex]?.itemId
+  if (!itemId || !isConnected.value) return
+  let lastItem: EmbyItem | undefined
+  let confirmed = false
+  for (const delay of [0, 400, 1200]) {
+    if (delay) await new Promise((resolve) => setTimeout(resolve, delay))
+    try {
+      lastItem = await window.emby.getItem(itemId)
+      const update = (items: EmbyItem[]) => items.map((item) => item.Id === lastItem?.Id ? { ...item, ...lastItem } : item)
+      libraryItems.value = update(libraryItems.value)
+      homeAllItems.value = update(homeAllItems.value)
+      homeMovieItems.value = update(homeMovieItems.value)
+      homeShowItems.value = update(homeShowItems.value)
+      latestItems.value = update(latestItems.value)
+      continueItems.value = update(continueItems.value)
+      nextUpItems.value = update(nextUpItems.value)
+      const serverPosition = lastItem.UserData?.PlaybackPositionTicks || 0
+      const expectedPosition = snapshot.positionTicks || 0
+      confirmed = expectedPosition < 10_000_000 || Boolean(lastItem.UserData?.Played) || Math.abs(serverPosition - expectedPosition) <= 150_000_000
+      if (confirmed) {
+        await refreshContinueItems()
+        return
+      }
+    } catch {
+      // The final attempt reports through the visible notice below.
+    }
+  }
+  if (!confirmed) showNotice('播放结束，但媒体状态暂未同步，请稍后刷新', 'error')
+}
+
+function handlePlaybackChanged(event: PlaybackEvent): void {
+  handlePlaybackSnapshot(event)
+  if (event.type === 'item-finalized' || event.phase === 'stopped') void refreshPlaybackData(event)
+}
+
+async function togglePlaybackPause(): Promise<void> {
+  const sessionId = playbackSnapshot.value.sessionId
+  if (!sessionId) return
+  const command = playbackSnapshot.value.phase === 'paused' ? 'resume' : 'pause'
+  handlePlaybackSnapshot(await window.emby.playbackCommand({ sessionId, command }))
+}
+
+async function sendPlaybackCommand(command: 'previous' | 'next' | 'stop-after-current'): Promise<void> {
+  const sessionId = playbackSnapshot.value.sessionId
+  if (!sessionId) return
+  try {
+    handlePlaybackSnapshot(await window.emby.playbackCommand({ sessionId, command }))
+  } catch (error) {
+    showNotice(error instanceof Error ? error.message : '播放控制失败', 'error')
+  }
+}
+
+async function retryPlayback(): Promise<void> {
+  const itemId = playbackSnapshot.value.currentItemId || playbackSnapshot.value.queue[playbackSnapshot.value.currentIndex]?.itemId
+  if (!itemId) return
+  try {
+    const snapshot = await window.emby.playbackStart({
+      itemId,
+      mode: playbackSnapshot.value.queue.length > 1 && form.continuousPlayback ? 'series' : 'single',
+      startTimeTicks: playbackSnapshot.value.positionTicks,
+      subtitlePreference: { chinesePreferred: form.preferChineseSubtitles },
+    })
+    handlePlaybackSnapshot(snapshot)
+  } catch (error) {
+    showNotice(error instanceof Error ? error.message : '重试播放失败', 'error')
+  }
+}
+
+function handleWindowFocus(): void {
+  if (focusRefreshTimer) clearTimeout(focusRefreshTimer)
+  focusRefreshTimer = setTimeout(async () => {
+    const snapshot = await window.emby.getPlaybackSnapshot()
+    if (snapshot.revision > playbackSnapshot.value.revision) handlePlaybackChanged({ ...snapshot, type: 'snapshot' })
+  }, 80)
 }
 
 onMounted(async () => {
@@ -594,11 +726,13 @@ onMounted(async () => {
     appBooted.value = true
     return
   }
+  window.addEventListener('focus', handleWindowFocus)
   try {
     const saved = await window.emby.getSettings()
     applySettings(saved)
     appBooted.value = true
-    removeMpvListener = window.emby.onMpvStatus(handleMpvStatus)
+    removePlaybackListener = window.emby.onPlaybackChanged(handlePlaybackChanged)
+    handlePlaybackSnapshot(await window.emby.getPlaybackSnapshot())
     if (saved.connected) {
       await loadHome()
     } else {
@@ -613,10 +747,12 @@ onMounted(async () => {
 
 onUnmounted(() => {
   window.removeEventListener('keydown', handleKeydown)
+  window.removeEventListener('focus', handleWindowFocus)
   if (searchTimer) clearTimeout(searchTimer)
   if (noticeTimer) clearTimeout(noticeTimer)
   stopHeroAutoPlay()
-  removeMpvListener?.()
+  if (focusRefreshTimer) clearTimeout(focusRefreshTimer)
+  removePlaybackListener?.()
 })
 </script>
 
@@ -700,6 +836,13 @@ onUnmounted(() => {
             <label class="field-label" for="mpv-path">MPV 路径</label>
             <input id="mpv-path" v-model="form.mpvPath" class="text-input" type="text" placeholder="mpv.exe 或 C:\\Apps\\mpv\\mpv.exe" />
             <p class="field-hint">如果 mpv.exe 不在系统 PATH 中，请填写完整路径。</p>
+            <div class="mpv-tools">
+              <button class="button button--ghost" type="button" @click="validateMpv()"><Check :size="16" />验证路径</button>
+              <button class="button button--ghost" type="button" @click="validateMpv(true)"><Play :size="16" />测试启动</button>
+              <span v-if="mpvValidation" class="mpv-status" :class="{ 'mpv-status--error': !mpvValidation.valid }">{{ mpvValidation.message }}<small v-if="mpvValidation.version">{{ mpvValidation.version }}</small></span>
+            </div>
+            <label class="setting-toggle"><input v-model="form.continuousPlayback" type="checkbox" /><span>电视剧自动连续播放下一集</span></label>
+            <label class="setting-toggle"><input v-model="form.preferChineseSubtitles" type="checkbox" /><span>优先选择中文字幕</span></label>
 
             <div v-if="errorMessage" class="inline-error"><AlertCircle :size="16" />{{ errorMessage }}</div>
             <div class="settings-actions">
@@ -780,9 +923,10 @@ onUnmounted(() => {
               <span v-if="heroItem.RunTimeTicks">{{ formatRuntime(heroItem.RunTimeTicks) }}</span>
             </div>
             <p class="hero-description">{{ heroItem.Overview || '打开详情，查看完整介绍与播放选项。' }}</p>
-            <button class="button button--primary button--large" type="button" @click="openDetails(heroItem)">
-              <Play :size="19" fill="currentColor" />查看详情
+            <button class="button button--primary button--large" type="button" @click="playItemDirect(heroItem)">
+              <Play :size="19" fill="currentColor" />{{ resumePosition(heroItem) ? '继续播放' : '播放' }}
             </button>
+            <button class="button button--ghost button--large" type="button" @click="openDetails(heroItem)">查看详情</button>
           </div>
           <div v-if="heroItems.length > 1" class="hero-controls" role="group" aria-label="推荐轮播控制">
             <button class="hero-arrow" type="button" title="上一部推荐" aria-label="上一部推荐" @click="showPreviousHero"><ChevronRight :size="18" class="hero-arrow--previous" /></button>
@@ -809,6 +953,7 @@ onUnmounted(() => {
         <div v-else-if="!homeLoading && !homeError && !heroItem" class="empty-state home-empty-state"><Clapperboard :size="32" /><h3>还没有可展示的内容</h3><p>请确认 Emby 媒体库已完成扫描，并检查当前账号权限。</p><button class="button button--ghost" type="button" @click="loadHome"><RefreshCw :size="16" />重新加载</button></div>
 
         <MediaRail v-if="continueItems.length" title="继续观看" :items="continueItems" poster-mode="series" @select="openDetails" />
+        <MediaRail v-if="nextUpItems.length" title="下一集" :items="nextUpItems" poster-mode="series" @select="openDetails" />
         <MediaRail v-if="latestItems.length" title="最近加入" :items="latestItems" :show-progress="false" @select="openDetails" />
 
         <section v-if="homeAllItems.length" class="library-shelves">
@@ -818,7 +963,6 @@ onUnmounted(() => {
           </div>
           <MediaRail v-if="homeMovieItems.length" title="Movie · 电影" :items="homeMovieItems" :count="homeMovieItems.length" :show-progress="false" @select="openDetails" />
           <MediaRail v-if="homeShowItems.length" title="Show · 剧集" :items="homeShowItems" :count="homeShowItems.length" :show-progress="false" @select="openDetails" />
-          <MediaRail title="All · 全部" :items="homeAllItems" :count="homeAllItems.length" :show-progress="false" @select="openDetails" />
         </section>
       </template>
 
@@ -858,8 +1002,13 @@ onUnmounted(() => {
     </div>
 
     <div v-if="currentPlaybackId" class="playback-bar">
-      <div class="playback-bar-copy"><span class="playing-dot"></span><span>正在播放</span><strong>{{ currentPlaybackLabel }}</strong></div>
+      <div class="playback-bar-copy"><span class="playing-dot"></span><span>{{ playbackPhaseLabel }}</span><strong>{{ currentPlaybackLabel }}</strong><small v-if="playbackSnapshot.queue.length">{{ playbackSnapshot.currentIndex + 1 }} / {{ playbackSnapshot.queue.length }}</small></div>
       <span class="playback-time">{{ Math.round(currentPlaybackPosition / 10_000_000 / 60) }} 分钟</span>
+      <button class="icon-button icon-button--small" type="button" title="上一集" :disabled="playbackSnapshot.currentIndex <= 0" @click="sendPlaybackCommand('previous')"><SkipBack :size="16" /></button>
+      <button class="icon-button icon-button--small" type="button" :title="playbackSnapshot.phase === 'paused' ? '继续播放' : '暂停播放'" @click="togglePlaybackPause"><Play v-if="playbackSnapshot.phase === 'paused'" :size="16" fill="currentColor" /><Pause v-else :size="16" /></button>
+      <button class="icon-button icon-button--small" type="button" title="下一集" :disabled="playbackSnapshot.currentIndex >= playbackSnapshot.queue.length - 1" @click="sendPlaybackCommand('next')"><SkipForward :size="16" /></button>
+      <button class="icon-button icon-button--small" type="button" title="播完本集后停止" @click="sendPlaybackCommand('stop-after-current')"><Square :size="14" /></button>
+      <button v-if="playbackSnapshot.phase === 'error'" class="icon-button icon-button--small" type="button" title="重试播放" @click="retryPlayback"><RefreshCw :size="15" /></button>
       <button class="icon-button icon-button--small" type="button" title="停止播放并同步进度" @click="stopPlayback"><X :size="16" /></button>
     </div>
 
