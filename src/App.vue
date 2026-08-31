@@ -22,6 +22,7 @@ import {
 } from 'lucide-vue-next'
 import PosterImage from './components/PosterImage.vue'
 import MediaCard from './components/MediaCard.vue'
+import MediaRail from './components/MediaRail.vue'
 import { chooseDefaultSubtitle, isExternalSubtitle, isChineseSubtitle } from './subtitlePreference'
 import type {
   EmbyItem,
@@ -30,6 +31,7 @@ import type {
   MpvStatus,
   PlaybackInfo,
   PublicSettings,
+  ItemsQuery,
 } from './types'
 
 type Page = 'home' | 'library' | 'settings'
@@ -43,7 +45,12 @@ const activeFilter = ref<LibraryFilter>('all')
 const views = ref<EmbyView[]>([])
 const activeViewId = ref('')
 const libraryItems = ref<EmbyItem[]>([])
+const homeAllItems = ref<EmbyItem[]>([])
+const homeMovieItems = ref<EmbyItem[]>([])
+const homeShowItems = ref<EmbyItem[]>([])
 const latestItems = ref<EmbyItem[]>([])
+const recommendationItems = ref<EmbyItem[]>([])
+const continueItems = ref<EmbyItem[]>([])
 const searchResults = ref<EmbyItem[]>([])
 const searchTerm = ref('')
 const searchLoading = ref(false)
@@ -60,6 +67,7 @@ const libraryLoading = ref(false)
 const isDetailLoading = ref(false)
 const errorMessage = ref('')
 const homeError = ref('')
+const recommendationError = ref('')
 const libraryError = ref('')
 const notice = ref<{ message: string; kind: 'success' | 'error' } | null>(null)
 const currentPlaybackId = ref('')
@@ -72,6 +80,7 @@ let removeMpvListener: (() => void) | undefined
 let homeRequestId = 0
 let libraryRequestId = 0
 let searchRequestId = 0
+let heroTimer: ReturnType<typeof setInterval> | undefined
 
 const form = reactive({
   serverUrl: 'http://127.0.0.1:8096',
@@ -82,17 +91,10 @@ const form = reactive({
 
 const isConnected = computed(() => Boolean(settings.value?.connected))
 const activeView = computed(() => views.value.find((view) => view.Id === activeViewId.value) || views.value[0])
-const heroItem = computed(() => latestItems.value[0] || libraryItems.value[0])
-const featuredItems = computed(() => latestItems.value.slice(0, 12))
-const continueItems = computed(() => {
-  const combined = [...libraryItems.value, ...latestItems.value]
-  const unique = new Map<string, EmbyItem>()
-  for (const item of combined) {
-    const position = item.UserData?.PlaybackPositionTicks || 0
-    if (position > 0 && !item.UserData?.Played) unique.set(item.Id, item)
-  }
-  return [...unique.values()].slice(0, 12)
-})
+const heroItems = computed(() => recommendationItems.value.length ? recommendationItems.value : latestItems.value.slice(0, 8))
+const heroIndex = ref(0)
+const heroItem = computed(() => heroItems.value[heroIndex.value] || heroItems.value[0])
+const heroLabel = computed(() => recommendationItems.value.length ? '电影推荐' : '最近加入')
 const displayItems = computed(() => {
   return libraryItems.value
 })
@@ -163,6 +165,58 @@ function preferredViewId(filter: LibraryFilter): string {
   return views.value.find((view) => viewSupportsFilter(view, filter))?.Id || views.value[0]?.Id || ''
 }
 
+async function loadAllItems(options: ItemsQuery): Promise<EmbyItem[]> {
+  const items: EmbyItem[] = []
+  let startIndex = 0
+  let totalRecordCount = Number.POSITIVE_INFINITY
+  let pageCount = 0
+  while (startIndex < totalRecordCount && pageCount < 200) {
+    const result = await window.emby.getItems({ ...options, startIndex, limit: 100 })
+    items.push(...result.Items)
+    totalRecordCount = result.TotalRecordCount
+    if (!result.Items.length) break
+    startIndex += result.Items.length
+    pageCount += 1
+  }
+  return items
+}
+
+function uniqueItems(items: EmbyItem[]): EmbyItem[] {
+  return [...new Map(items.map((item) => [item.Id, item])).values()]
+}
+
+function stopHeroAutoPlay(): void {
+  if (heroTimer) clearInterval(heroTimer)
+  heroTimer = undefined
+}
+
+function startHeroAutoPlay(): void {
+  stopHeroAutoPlay()
+  if (heroItems.value.length < 2 || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return
+  heroTimer = setInterval(() => {
+    heroIndex.value = (heroIndex.value + 1) % heroItems.value.length
+  }, 8000)
+}
+
+function setHeroPaused(paused: boolean): void {
+  if (paused) stopHeroAutoPlay()
+  else startHeroAutoPlay()
+}
+
+function showHero(index: number): void {
+  if (!heroItems.value.length) return
+  heroIndex.value = (index + heroItems.value.length) % heroItems.value.length
+  startHeroAutoPlay()
+}
+
+function showNextHero(): void {
+  showHero(heroIndex.value + 1)
+}
+
+function showPreviousHero(): void {
+  showHero(heroIndex.value - 1)
+}
+
 async function loadHome(): Promise<void> {
   if (!isConnected.value) return
   const requestId = ++homeRequestId
@@ -175,7 +229,12 @@ async function loadHome(): Promise<void> {
     if (!views.value.some((view) => view.Id === activeViewId.value)) {
       activeViewId.value = views.value[0]?.Id || ''
     }
-    const [latest, library] = await Promise.all([
+    recommendationError.value = ''
+    const [recommendations, latest, continued, allItems] = await Promise.all([
+      window.emby.getMovieRecommendations().catch((error: unknown) => {
+        recommendationError.value = error instanceof Error ? error.message : '读取电影推荐失败'
+        return []
+      }),
       window.emby.getItems({
         recursive: true,
         includeItemTypes: 'Movie,Series',
@@ -183,17 +242,32 @@ async function loadHome(): Promise<void> {
         sortOrder: 'Descending',
         limit: 24,
       }),
-      window.emby.getItems({
-        parentId: activeViewId.value || undefined,
+      loadAllItems({
+        recursive: true,
+        includeItemTypes: 'Movie,Episode',
+        filters: 'IsResumable',
+        sortBy: 'DatePlayed',
+        sortOrder: 'Descending',
+      }),
+      loadAllItems({
         recursive: true,
         includeItemTypes: 'Movie,Series',
         sortBy: 'SortName',
-        limit: 60,
+        sortOrder: 'Ascending',
       }),
     ])
     if (requestId !== homeRequestId) return
     latestItems.value = latest.Items
-    libraryItems.value = library.Items
+    recommendationItems.value = uniqueItems(recommendations.flatMap((category) => category.Items || []))
+      .filter((item) => item.Type === 'Movie')
+      .slice(0, 8)
+    continueItems.value = uniqueItems(continued)
+    homeAllItems.value = uniqueItems(allItems)
+    homeMovieItems.value = homeAllItems.value.filter((item) => item.Type === 'Movie')
+    homeShowItems.value = homeAllItems.value.filter((item) => item.Type === 'Series')
+    libraryItems.value = homeAllItems.value
+    heroIndex.value = 0
+    startHeroAutoPlay()
   } catch (error) {
     if (requestId === homeRequestId) {
       homeError.value = error instanceof Error ? error.message : '加载 Emby 内容失败'
@@ -243,7 +317,7 @@ async function loadLibrary(viewId = activeViewId.value, filter = activeFilter.va
 
 function goHome(): void {
   activePage.value = 'home'
-  if ((!latestItems.value.length && !libraryItems.value.length) || homeError.value) void loadHome()
+  if ((!latestItems.value.length && !homeAllItems.value.length) || homeError.value) void loadHome()
 }
 
 function goLibrary(filter: LibraryFilter): void {
@@ -300,7 +374,13 @@ async function disconnect(): Promise<void> {
     applySettings(await window.emby.logout())
     views.value = []
     libraryItems.value = []
+    homeAllItems.value = []
+    homeMovieItems.value = []
+    homeShowItems.value = []
     latestItems.value = []
+    recommendationItems.value = []
+    continueItems.value = []
+    stopHeroAutoPlay()
     activePage.value = 'settings'
     showNotice('已断开 Emby 连接')
   } catch (error) {
@@ -485,6 +565,7 @@ onUnmounted(() => {
   window.removeEventListener('keydown', handleKeydown)
   if (searchTimer) clearTimeout(searchTimer)
   if (noticeTimer) clearTimeout(noticeTimer)
+  stopHeroAutoPlay()
   removeMpvListener?.()
 })
 </script>
@@ -583,11 +664,20 @@ onUnmounted(() => {
       </section>
 
       <template v-else-if="activePage === 'home'">
-        <section v-if="heroItem" class="hero-section">
-           <PosterImage :item="heroItem" variant="backdrop" eager />
+        <section
+          v-if="heroItem"
+          class="hero-section"
+          @mouseenter="setHeroPaused(true)"
+          @mouseleave="setHeroPaused(false)"
+          @focusin="setHeroPaused(true)"
+          @focusout="setHeroPaused(false)"
+        >
+           <Transition name="hero-fade" mode="out-in">
+             <PosterImage :key="heroItem.Id" :item="heroItem" variant="backdrop" eager />
+           </Transition>
           <div class="hero-overlay"></div>
           <div class="hero-content">
-            <p class="eyebrow">{{ heroItem.Type === 'Series' ? '剧集推荐' : '电影推荐' }}</p>
+            <p class="eyebrow">{{ heroLabel }}</p>
             <h1>{{ heroItem.Name }}</h1>
             <div class="hero-meta">
               <span v-if="heroItem.ProductionYear">{{ heroItem.ProductionYear }}</span>
@@ -600,33 +690,41 @@ onUnmounted(() => {
               <Play :size="19" fill="currentColor" />查看详情
             </button>
           </div>
+          <div v-if="heroItems.length > 1" class="hero-controls" role="group" aria-label="推荐轮播控制">
+            <button class="hero-arrow" type="button" title="上一部推荐" aria-label="上一部推荐" @click="showPreviousHero"><ChevronRight :size="18" class="hero-arrow--previous" /></button>
+            <div class="hero-dots" role="tablist" aria-label="选择推荐内容">
+              <button
+                v-for="(item, index) in heroItems"
+                :key="item.Id"
+                class="hero-dot"
+                :class="{ active: index === heroIndex }"
+                type="button"
+                role="tab"
+                :aria-selected="index === heroIndex"
+                :aria-label="`第 ${index + 1} 部推荐：${item.Name}`"
+                @click="showHero(index)"
+              ></button>
+            </div>
+            <button class="hero-arrow" type="button" title="下一部推荐" aria-label="下一部推荐" @click="showNextHero"><ChevronRight :size="18" /></button>
+          </div>
+          <p v-if="recommendationError" class="hero-note">推荐暂时不可用，当前展示最近加入内容</p>
         </section>
 
         <div v-if="homeError" class="error-banner"><AlertCircle :size="18" />{{ homeError }}<button class="text-button" type="button" @click="loadHome">重试</button></div>
         <div v-if="homeLoading && !heroItem" class="loading-state"><LoaderCircle class="spin" :size="24" />正在加载媒体库</div>
         <div v-else-if="!homeLoading && !homeError && !heroItem" class="empty-state home-empty-state"><Clapperboard :size="32" /><h3>还没有可展示的内容</h3><p>请确认 Emby 媒体库已完成扫描，并检查当前账号权限。</p><button class="button button--ghost" type="button" @click="loadHome"><RefreshCw :size="16" />重新加载</button></div>
 
-        <section v-if="continueItems.length" class="content-section">
-          <div class="section-heading"><div><h2>继续观看</h2></div><button class="text-button" type="button" @click="goLibrary('all')">查看全部<ChevronRight :size="16" /></button></div>
-          <div class="poster-row">
-            <MediaCard v-for="item in continueItems" :key="item.Id" :item="item" @select="openDetails" />
-          </div>
-        </section>
+        <MediaRail v-if="continueItems.length" title="继续观看" :items="continueItems" @select="openDetails" />
+        <MediaRail v-if="latestItems.length" title="最近加入" :items="latestItems" :show-progress="false" @select="openDetails" />
 
-        <section v-if="featuredItems.length" class="content-section">
-          <div class="section-heading"><div><h2>最近加入</h2></div><button class="text-button" type="button" @click="goLibrary('all')">浏览片库<ChevronRight :size="16" /></button></div>
-          <div class="poster-row">
-            <MediaCard v-for="item in featuredItems" :key="item.Id" :item="item" @select="openDetails" />
+        <section v-if="homeAllItems.length" class="library-shelves">
+          <div class="library-shelves-heading">
+            <div><p class="eyebrow">YOUR LIBRARY</p><h2>完整媒体库</h2></div>
+            <span class="section-count">{{ homeAllItems.length }} 项内容 · {{ views.length }} 个集合</span>
           </div>
-        </section>
-
-        <section v-if="views.length" class="library-strip">
-           <div class="section-heading"><div><h2>媒体库</h2></div><span class="section-count">{{ views.length }} 个集合</span></div>
-           <div class="library-tabs">
-             <button v-for="view in views" :key="view.Id" class="library-tab" :class="{ active: activeViewId === view.Id }" type="button" @click="activeViewId = view.Id; activeFilter = 'all'; void loadLibrary(view.Id, 'all')">
-               <span><strong>{{ view.Name }}</strong><small>{{ view.CollectionType || '媒体库' }}</small></span><ChevronRight :size="16" />
-             </button>
-          </div>
+          <MediaRail v-if="homeMovieItems.length" title="Movie · 电影" :items="homeMovieItems" :count="homeMovieItems.length" :show-progress="false" @select="openDetails" />
+          <MediaRail v-if="homeShowItems.length" title="Show · 剧集" :items="homeShowItems" :count="homeShowItems.length" :show-progress="false" @select="openDetails" />
+          <MediaRail title="All · 全部" :items="homeAllItems" :count="homeAllItems.length" :show-progress="false" @select="openDetails" />
         </section>
       </template>
 
