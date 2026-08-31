@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -41,5 +41,17 @@ describe('AppLogger', () => {
       logger.initialize(blockedPath)
       logger.info('test', 'write')
     }).not.toThrow()
+  })
+
+  it('prunes history beyond the four retained backups', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'ember-logger-prune-'))
+    writeFileSync(join(directory, 'ember-player.log.4'), 'keep')
+    writeFileSync(join(directory, 'ember-player.log.5'), 'remove')
+    const logger = new AppLogger()
+
+    logger.initialize(directory)
+
+    expect(existsSync(join(directory, 'ember-player.log.4'))).toBe(true)
+    expect(existsSync(join(directory, 'ember-player.log.5'))).toBe(false)
   })
 })
