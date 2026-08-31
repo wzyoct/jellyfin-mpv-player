@@ -49,6 +49,61 @@ npm run dist
 - 应用中的 MPV 路径可用。
 - 桌面快捷方式和开始菜单入口名称正确。
 
+## GitHub 同步与版本存档
+
+项目远程仓库已经配置为：
+
+`https://github.com/wzyoct/emby-mickey.git`
+
+每次面向用户的更新都按下面的顺序执行，确保程序、文档和 GitHub 提交保持一致：
+
+1. 更新版本号，同时更新 `package.json` 和 `package-lock.json`：
+
+   ```powershell
+   npm version <新版本号> --no-git-tag-version
+   ```
+
+2. 在 `src/data/release-notes.json` 顶部增加同版本的日期、摘要和变更项。
+3. 生成结构化更新文档：
+
+   ```powershell
+   npm run release:notes
+   ```
+
+   `CHANGELOG.md` 只能由该命令从 `src/data/release-notes.json` 生成，不要手工维护两份内容。
+
+4. 运行正式 Windows 发布流程：
+
+   ```powershell
+   npm run dist
+   ```
+
+   该流程会先检查版本和测试，再生成安装版、绿色版、启动说明、更新记录和 SHA256 校验值；旧版会自动移动到 `release/历史版本/<版本号>/`。
+
+5. 检查差异和文件状态，只暂存本次更新涉及的源码与文档：
+
+   ```powershell
+   git diff --check
+   git status
+   git add <本次实际修改的文件>
+   git diff --cached --check
+   ```
+
+6. 使用 Conventional Commits 格式创建存档提交，并推送当前分支：
+
+   ```powershell
+   git commit -m "chore: 发布 Ember Player <版本号>"
+   git push origin HEAD
+   ```
+
+7. 需要让 GitHub 默认分支立即跟随当前正式版本时，在确认 `main` 没有独立提交后执行快进推送：
+
+   ```powershell
+   git push origin HEAD:main
+   ```
+
+Git 保存源码、配置和更新文档；安装包、绿色版和构建内部文件属于可再生产物，按项目 `.gitignore` 规则保留在本机 `release/`，其中旧版本不会被覆盖。当前版本的 Windows 文件名和校验值可直接查看 `release/03-更新记录.txt` 与 `release/04-文件校验值-SHA256.txt`。
+
 ## 注意事项
 
 - 安装包和 ZIP 是构建产物，不提交到 Git。
