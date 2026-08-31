@@ -1,6 +1,6 @@
 {
   "name": "ember-player",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "A focused Emby desktop client powered by MPV.",
   "productName": "Ember Player",
   "main": "dist-electron/electron/main.js",
@@ -51,20 +51,8 @@
       "en-US"
     ],
     "win": {
-      "target": [
-        "nsis",
-        "zip"
-      ],
+      "target": ["dir"],
       "signAndEditExecutable": false
-    },
-    "nsis": {
-      "oneClick": true,
-      "perMachine": false,
-      "allowToChangeInstallationDirectory": false,
-      "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "shortcutName": "Ember Player",
-      "runAfterFinish": true
     }
   }
 }
