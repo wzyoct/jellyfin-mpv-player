@@ -12,11 +12,16 @@ export interface MediaStream {
   Type?: 'Audio' | 'Video' | 'Subtitle' | string
   Codec?: string
   Language?: string
+  DisplayLanguage?: string
   DisplayTitle?: string
   Title?: string
   IsDefault?: boolean
   IsExternal?: boolean
+  IsExternalUrl?: boolean
   IsTextSubtitleStream?: boolean
+  DeliveryUrl?: string
+  SupportsExternalStream?: boolean
+  Path?: string
 }
 
 export interface EmbyItem {

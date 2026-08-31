@@ -256,6 +256,9 @@ async function launchMpv(request: PlayRequest): Promise<{ itemId: string; source
     || sources.find((candidate) => candidate.SupportsDirectPlay)
     || sources.find((candidate) => candidate.SupportsDirectStream)
     || sources[0]
+  const subtitleStream = request.subtitleStreamIndex === undefined
+    ? undefined
+    : source.MediaStreams?.find((stream) => stream.Type === 'Subtitle' && stream.Index === request.subtitleStreamIndex)
   const startTimeTicks = request.startTimeTicks || 0
   const streamUrl = client.buildStreamUrl(request.itemId, source, {
     audioStreamIndex: request.audioStreamIndex,
@@ -271,7 +274,7 @@ async function launchMpv(request: PlayRequest): Promise<{ itemId: string; source
     `--http-header-fields=${formatHeaderFields(source, client.token)}`,
   ]
   if (startTimeTicks > 0) args.push(`--start=${startTimeTicks / 10_000_000}`)
-  if (request.subtitleStreamIndex !== undefined) {
+  if (request.subtitleStreamIndex !== undefined && (!subtitleStream || subtitleStream.IsTextSubtitleStream !== false)) {
     args.push(`--sub-file=${client.buildSubtitleUrl(request.itemId, source.Id, request.subtitleStreamIndex, startTimeTicks)}`)
   }
   args.push(streamUrl)

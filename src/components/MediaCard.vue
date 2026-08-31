@@ -6,8 +6,10 @@ import type { EmbyItem } from '../types'
 const props = withDefaults(defineProps<{
   item: EmbyItem
   showProgress?: boolean
+  eager?: boolean
 }>(), {
   showProgress: true,
+  eager: false,
 })
 
 defineEmits<{
@@ -31,7 +33,7 @@ const subtitle = computed(() => {
 
 <template>
   <button class="poster-card" type="button" :aria-label="`打开 ${item.Name}`" @click="$emit('select', item)">
-    <PosterImage :item="item" />
+      <PosterImage :item="item" :eager="eager" />
     <span v-if="showProgress && progress" class="poster-progress"><span :style="{ width: `${progress}%` }"></span></span>
     <span class="poster-info"><strong>{{ item.Name }}</strong><small>{{ subtitle }}</small></span>
   </button>

@@ -12,11 +12,11 @@
     "build:renderer": "vite build",
     "build:electron": "tsc -p electron/tsconfig.json",
     "test:contract": "npm run build:electron && node scripts/emby-contract-smoke.cjs",
+    "test:subtitle": "vitest run src/subtitlePreference.test.ts",
     "typecheck": "vue-tsc --noEmit && tsc -p electron/tsconfig.json --noEmit",
     "dist": "npm run build && electron-builder",
     "start": "electron ."
   },
-  "dependencies": {},
   "devDependencies": {
     "@types/node": "^22.10.2",
     "@vitejs/plugin-vue": "^5.2.1",
@@ -26,6 +26,7 @@
     "lucide-vue-next": "^0.468.0",
     "typescript": "^5.7.2",
     "vite": "^6.0.5",
+    "vitest": "^4.1.11",
     "vue": "^3.5.13",
     "vue-tsc": "^2.2.0",
     "wait-on": "^8.0.1"

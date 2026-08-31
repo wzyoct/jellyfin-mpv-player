@@ -1,18 +1,23 @@
 <script setup lang="ts">
-import { onMounted, ref, watch } from 'vue'
+import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { Film, ImageOff } from 'lucide-vue-next'
 import type { EmbyItem } from '../types'
 
 const props = withDefaults(defineProps<{
   item: EmbyItem
   variant?: 'poster' | 'backdrop'
+  eager?: boolean
 }>(), {
   variant: 'poster',
+  eager: false,
 })
 
+const imageRoot = ref<HTMLElement | null>(null)
 const imageUrl = ref('')
 const loading = ref(true)
+const loadStarted = ref(false)
 let loadRequestId = 0
+let observer: IntersectionObserver | undefined
 
 async function loadImage(): Promise<void> {
   const requestId = ++loadRequestId
@@ -41,12 +46,43 @@ async function loadImage(): Promise<void> {
   }
 }
 
-onMounted(() => void loadImage())
-watch(() => [props.item.Id, props.variant, props.item.ImageTags?.Primary, props.item.BackdropImageTags?.[0]], () => void loadImage())
+function startLoading(): void {
+  if (loadStarted.value) return
+  loadStarted.value = true
+  void loadImage()
+}
+
+function resetImage(): void {
+  loadStarted.value = false
+  imageUrl.value = ''
+  loading.value = true
+  if (props.eager || !('IntersectionObserver' in window)) {
+    startLoading()
+  } else if (imageRoot.value) {
+    observer?.observe(imageRoot.value)
+  }
+}
+
+onMounted(() => {
+  if (props.eager || !('IntersectionObserver' in window)) {
+    startLoading()
+    return
+  }
+  observer = new IntersectionObserver((entries) => {
+    if (entries.some((entry) => entry.isIntersecting)) {
+      observer?.disconnect()
+      startLoading()
+    }
+  }, { rootMargin: '320px 0px' })
+  if (imageRoot.value) observer.observe(imageRoot.value)
+})
+
+onUnmounted(() => observer?.disconnect())
+watch(() => [props.item.Id, props.variant, props.item.ImageTags?.Primary, props.item.BackdropImageTags?.[0]], resetImage)
 </script>
 
 <template>
-  <div class="poster-image" :class="[`poster-image--${variant}`, { 'is-loading': loading }]">
+  <div ref="imageRoot" class="poster-image" :class="[`poster-image--${variant}`, { 'is-loading': loading }]">
     <img v-if="imageUrl" :src="imageUrl" :alt="item.Name" @load="loading = false" @error="imageUrl = ''; loading = false" />
     <div v-else class="poster-placeholder">
       <ImageOff v-if="!loading" :size="variant === 'backdrop' ? 32 : 24" stroke-width="1.4" />

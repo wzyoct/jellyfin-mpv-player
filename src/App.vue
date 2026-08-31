@@ -22,6 +22,7 @@ import {
 } from 'lucide-vue-next'
 import PosterImage from './components/PosterImage.vue'
 import MediaCard from './components/MediaCard.vue'
+import { chooseDefaultSubtitle, isExternalSubtitle, isChineseSubtitle } from './subtitlePreference'
 import type {
   EmbyItem,
   EmbyView,
@@ -36,6 +37,7 @@ type LibraryFilter = 'all' | 'Movie' | 'Series'
 
 const settings = ref<PublicSettings | null>(null)
 const appBooted = ref(false)
+const isContentScrolled = ref(false)
 const activePage = ref<Page>('home')
 const activeFilter = ref<LibraryFilter>('all')
 const views = ref<EmbyView[]>([])
@@ -63,6 +65,7 @@ const notice = ref<{ message: string; kind: 'success' | 'error' } | null>(null)
 const currentPlaybackId = ref('')
 const currentPlaybackPosition = ref(0)
 const searchInput = ref<HTMLInputElement | null>(null)
+const pageScroll = ref<HTMLElement | null>(null)
 let searchTimer: ReturnType<typeof setTimeout> | undefined
 let noticeTimer: ReturnType<typeof setTimeout> | undefined
 let removeMpvListener: (() => void) | undefined
@@ -100,6 +103,7 @@ const mediaStreams = computed<MediaStream[]>(() => {
 })
 const audioStreams = computed(() => mediaStreams.value.filter((stream) => stream.Type === 'Audio'))
 const subtitleStreams = computed(() => mediaStreams.value.filter((stream) => stream.Type === 'Subtitle'))
+const selectedSubtitleStream = computed(() => subtitleStreams.value.find((stream) => stream.Index === selectedSubtitle.value))
 const currentPlaybackItem = computed(() => {
   const all = [...libraryItems.value, ...latestItems.value, ...searchResults.value]
   return all.find((item) => item.Id === currentPlaybackId.value)
@@ -119,6 +123,16 @@ function itemTypeLabel(item: EmbyItem): string {
   if (item.Type === 'Season') return `第 ${item.IndexNumber || 1} 季`
   if (item.Type === 'Episode') return `第 ${item.ParentIndexNumber || 1} 季 · 第 ${item.IndexNumber || 1} 集`
   return item.Type
+}
+
+function streamLabel(stream: MediaStream, kind: 'audio' | 'subtitle'): string {
+  const name = stream.DisplayTitle || stream.Title || stream.DisplayLanguage || stream.Language
+    || `${kind === 'audio' ? '音轨' : '字幕'} ${stream.Index ?? ''}`
+  if (kind === 'subtitle') {
+    const source = isExternalSubtitle(stream) ? '外挂' : '内嵌'
+    return `${isChineseSubtitle(stream) ? '中文字幕' : name} · ${source}`
+  }
+  return name
 }
 
 function showNotice(message: string, kind: 'success' | 'error' = 'success'): void {
@@ -332,6 +346,10 @@ function handleKeydown(event: KeyboardEvent): void {
   }
 }
 
+function handlePageScroll(): void {
+  isContentScrolled.value = Boolean(pageScroll.value?.scrollTop)
+}
+
 watch(searchTerm, () => {
   if (searchTimer) clearTimeout(searchTimer)
   searchTimer = setTimeout(() => void performSearch(), 360)
@@ -344,7 +362,7 @@ async function loadPlayableDetails(item: EmbyItem): Promise<void> {
     const streams = (playbackInfo.value.MediaSources?.[0]?.MediaStreams || item.MediaStreams || []) as MediaStream[]
     selectedAudio.value = streams.find((stream) => stream.Type === 'Audio' && stream.IsDefault)?.Index
       ?? streams.find((stream) => stream.Type === 'Audio')?.Index
-    selectedSubtitle.value = streams.find((stream) => stream.Type === 'Subtitle' && stream.IsDefault)?.Index
+    selectedSubtitle.value = chooseDefaultSubtitle(streams)
   } catch (error) {
     showNotice(error instanceof Error ? error.message : '读取播放信息失败', 'error')
   } finally {
@@ -473,7 +491,7 @@ onUnmounted(() => {
 
 <template>
   <div class="app-shell" :class="{ 'app-shell--standalone': !isConnected && appBooted, 'app-shell--booting': !appBooted }">
-    <header v-if="isConnected" class="topbar">
+    <header v-if="isConnected" class="topbar" :class="{ 'topbar--scrolled': isContentScrolled }">
       <button class="brand" type="button" aria-label="返回首页" @click="goHome">
         <span class="brand-mark">E</span>
         <span class="brand-copy">EMBER<span>PLAYER</span></span>
@@ -509,7 +527,7 @@ onUnmounted(() => {
       </div>
     </header>
 
-    <main class="page-content" :class="{ 'page-content--standalone': !isConnected && appBooted }">
+    <main ref="pageScroll" class="page-content" :class="{ 'page-content--standalone': !isConnected && appBooted }" @scroll="handlePageScroll">
       <section v-if="!appBooted" class="boot-screen" aria-busy="true" aria-live="polite">
         <span class="brand-mark">E</span>
         <LoaderCircle class="spin" :size="22" />
@@ -566,10 +584,10 @@ onUnmounted(() => {
 
       <template v-else-if="activePage === 'home'">
         <section v-if="heroItem" class="hero-section">
-          <PosterImage :item="heroItem" variant="backdrop" />
+           <PosterImage :item="heroItem" variant="backdrop" eager />
           <div class="hero-overlay"></div>
           <div class="hero-content">
-            <p class="eyebrow">{{ heroItem.Type === 'Series' ? 'FEATURED SERIES' : 'FEATURED MOVIE' }}</p>
+            <p class="eyebrow">{{ heroItem.Type === 'Series' ? '剧集推荐' : '电影推荐' }}</p>
             <h1>{{ heroItem.Name }}</h1>
             <div class="hero-meta">
               <span v-if="heroItem.ProductionYear">{{ heroItem.ProductionYear }}</span>
@@ -582,7 +600,6 @@ onUnmounted(() => {
               <Play :size="19" fill="currentColor" />查看详情
             </button>
           </div>
-          <div class="hero-scroll-hint"><span>SCROLL TO EXPLORE</span><ChevronRight :size="16" /></div>
         </section>
 
         <div v-if="homeError" class="error-banner"><AlertCircle :size="18" />{{ homeError }}<button class="text-button" type="button" @click="loadHome">重试</button></div>
@@ -590,21 +607,21 @@ onUnmounted(() => {
         <div v-else-if="!homeLoading && !homeError && !heroItem" class="empty-state home-empty-state"><Clapperboard :size="32" /><h3>还没有可展示的内容</h3><p>请确认 Emby 媒体库已完成扫描，并检查当前账号权限。</p><button class="button button--ghost" type="button" @click="loadHome"><RefreshCw :size="16" />重新加载</button></div>
 
         <section v-if="continueItems.length" class="content-section">
-          <div class="section-heading"><div><p class="eyebrow">PICK UP WHERE YOU LEFT OFF</p><h2>继续观看</h2></div><button class="text-button" type="button" @click="goLibrary('all')">查看全部<ChevronRight :size="16" /></button></div>
+          <div class="section-heading"><div><h2>继续观看</h2></div><button class="text-button" type="button" @click="goLibrary('all')">查看全部<ChevronRight :size="16" /></button></div>
           <div class="poster-row">
             <MediaCard v-for="item in continueItems" :key="item.Id" :item="item" @select="openDetails" />
           </div>
         </section>
 
         <section v-if="featuredItems.length" class="content-section">
-          <div class="section-heading"><div><p class="eyebrow">FRESH FROM YOUR LIBRARY</p><h2>最近加入</h2></div><button class="text-button" type="button" @click="goLibrary('all')">浏览片库<ChevronRight :size="16" /></button></div>
+          <div class="section-heading"><div><h2>最近加入</h2></div><button class="text-button" type="button" @click="goLibrary('all')">浏览片库<ChevronRight :size="16" /></button></div>
           <div class="poster-row">
             <MediaCard v-for="item in featuredItems" :key="item.Id" :item="item" @select="openDetails" />
           </div>
         </section>
 
         <section v-if="views.length" class="library-strip">
-           <div class="section-heading"><div><p class="eyebrow">YOUR COLLECTIONS</p><h2>媒体库</h2></div><span class="section-count">{{ views.length }} 个集合</span></div>
+           <div class="section-heading"><div><h2>媒体库</h2></div><span class="section-count">{{ views.length }} 个集合</span></div>
            <div class="library-tabs">
              <button v-for="view in views" :key="view.Id" class="library-tab" :class="{ active: activeViewId === view.Id }" type="button" @click="activeViewId = view.Id; activeFilter = 'all'; void loadLibrary(view.Id, 'all')">
                <span><strong>{{ view.Name }}</strong><small>{{ view.CollectionType || '媒体库' }}</small></span><ChevronRight :size="16" />
@@ -659,7 +676,7 @@ onUnmounted(() => {
     <div v-if="selectedItem" class="modal-backdrop" @click.self="closeDetails">
       <section class="detail-modal" role="dialog" aria-modal="true" :aria-label="selectedItem.Name">
         <button class="modal-close icon-button" type="button" title="关闭详情" @click="closeDetails"><X :size="20" /></button>
-        <div class="detail-art"><PosterImage :item="selectedItem" variant="backdrop" /><div class="detail-art-fade"></div></div>
+        <div class="detail-art"><PosterImage :item="selectedItem" variant="backdrop" eager /><div class="detail-art-fade"></div></div>
         <div class="detail-body">
           <p class="eyebrow">{{ itemTypeLabel(selectedItem) }}</p>
           <h2>{{ selectedItem.Name }}</h2>
@@ -672,8 +689,8 @@ onUnmounted(() => {
           <div v-if="selectedItem.Type === 'Movie' || selectedItem.Type === 'Episode'" class="detail-actions">
             <div v-if="isDetailLoading" class="loading-inline"><LoaderCircle class="spin" :size="18" />读取播放选项</div>
             <template v-else>
-              <label v-if="audioStreams.length" class="track-select"><Volume2 :size="16" /><select v-model="selectedAudio" aria-label="选择音轨"><option :value="undefined">默认音轨</option><option v-for="stream in audioStreams" :key="stream.Index" :value="stream.Index">{{ stream.DisplayTitle || stream.Title || stream.Language || `音轨 ${stream.Index}` }}</option></select></label>
-              <label v-if="subtitleStreams.length" class="track-select"><Menu :size="16" /><select v-model="selectedSubtitle" aria-label="选择字幕"><option :value="undefined">关闭字幕</option><option v-for="stream in subtitleStreams" :key="stream.Index" :value="stream.Index">{{ stream.DisplayTitle || stream.Title || stream.Language || `字幕 ${stream.Index}` }}</option></select></label>
+              <label v-if="audioStreams.length" class="track-select"><Volume2 :size="16" /><select v-model="selectedAudio" aria-label="选择音轨"><option :value="undefined">默认音轨</option><option v-for="stream in audioStreams" :key="stream.Index" :value="stream.Index">{{ streamLabel(stream, 'audio') }}</option></select></label>
+              <label v-if="subtitleStreams.length" class="track-select"><Menu :size="16" /><select v-model="selectedSubtitle" aria-label="选择字幕"><option :value="undefined">关闭字幕</option><option v-for="stream in subtitleStreams" :key="stream.Index" :value="stream.Index">{{ streamLabel(stream, 'subtitle') }}{{ stream.Index === selectedSubtitleStream?.Index ? '（当前）' : '' }}</option></select></label>
               <button class="button button--primary button--large" type="button" :disabled="isDetailLoading" @click="playSelected"><Play :size="18" fill="currentColor" />{{ resumePosition(selectedItem) ? '继续播放' : '播放' }}</button>
             </template>
           </div>
