@@ -3,8 +3,8 @@ import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import net from 'node:net'
 import { EmbyClient, normalizeServerUrl, type MediaSourceInfo, type PlaybackInfo } from './emby'
+import { MpvIpc } from './mpvIpc'
 
 interface StoredSettings {
   serverUrl: string
@@ -12,6 +12,7 @@ interface StoredSettings {
   userId?: string
   encryptedToken?: string
   mpvPath: string
+  deviceId: string
 }
 
 interface PlayRequest {
@@ -28,11 +29,21 @@ interface ActivePlayback {
   playbackInfo: PlaybackInfo
   process: ChildProcess
   pipeName: string
+  ipc: MpvIpc | null
   positionSeconds: number
   durationSeconds?: number
+  positionFresh: boolean
+  positionObserved: boolean
+  isPaused: boolean
   progressTimer: NodeJS.Timeout
   progressBusy: boolean
+  progressPromise?: Promise<void>
   stopped: boolean
+  finalizing: boolean
+  finalizePromise?: Promise<void>
+  syncError?: string
+  ipcCloseListener?: () => void
+  lastStatusAt: number
   audioStreamIndex?: number
   subtitleStreamIndex?: number
 }
@@ -43,6 +54,7 @@ let storedSettings: StoredSettings = {
   serverUrl: 'http://127.0.0.1:8096',
   username: '',
   mpvPath: 'mpv.exe',
+  deviceId: randomUUID(),
 }
 let embyClient: EmbyClient | null = null
 let activePlayback: ActivePlayback | null = null
@@ -75,7 +87,9 @@ function readSettings(): void {
       ...storedSettings,
       ...parsed,
       mpvPath: parsed.mpvPath || 'mpv.exe',
+      deviceId: parsed.deviceId || randomUUID(),
     }
+    persistSettings()
   } catch {
     // A corrupted local settings file should not prevent the app from opening.
   }
@@ -110,7 +124,7 @@ function restoreClient(): void {
   const token = decryptToken()
   if (token && storedSettings.userId) {
     try {
-      embyClient = new EmbyClient(storedSettings.serverUrl, token, storedSettings.userId)
+      embyClient = new EmbyClient(storedSettings.serverUrl, token, storedSettings.userId, storedSettings.deviceId)
     } catch {
       embyClient = null
     }
@@ -137,113 +151,177 @@ function formatHeaderFields(source: MediaSourceInfo, token: string): string {
     .join(',')
 }
 
-function queryMpvProperty(pipeName: string, property: string): Promise<number | null> {
-  return new Promise((resolve) => {
-    let settled = false
-    let received = ''
-    const socket = net.createConnection(pipeName)
-    const finish = (value: number | null) => {
-      if (settled) return
-      settled = true
-      socket.destroy()
-      resolve(value)
-    }
-    const timer = setTimeout(() => finish(null), 1600)
-    socket.once('error', () => {
-      clearTimeout(timer)
-      finish(null)
-    })
-    socket.on('data', (chunk) => {
-      received += chunk.toString()
-      const lines = received.split('\n')
-      received = lines.pop() || ''
-      for (const line of lines) {
-        try {
-          const message = JSON.parse(line) as { request_id?: number; data?: unknown }
-          if (message.request_id === 1) {
-            clearTimeout(timer)
-            finish(typeof message.data === 'number' ? message.data : null)
-            return
-          }
-        } catch {
-          // Ignore partial or non-JSON lines from MPV IPC.
-        }
-      }
-    })
-    socket.once('connect', () => {
-      socket.write(`${JSON.stringify({ command: ['get_property', property], request_id: 1 })}\n`)
-    })
-  })
-}
-
 async function reportActiveProgress(force = false): Promise<void> {
   const active = activePlayback
   const client = embyClient
-  if (!active || active.stopped || !client || (!force && active.progressBusy)) return
-  active.progressBusy = true
-  try {
-    const [position, duration] = await Promise.all([
-      queryMpvProperty(active.pipeName, 'time-pos'),
-      queryMpvProperty(active.pipeName, 'duration'),
-    ])
-    if (position !== null) active.positionSeconds = position
-    if (duration !== null) active.durationSeconds = duration
-    const positionTicks = Math.max(0, Math.round(active.positionSeconds * 10_000_000))
-    await client.reportProgress({
-      ItemId: active.itemId,
-      MediaSourceId: active.source.Id,
-      PlaySessionId: active.playbackInfo.PlaySessionId,
-      PositionTicks: positionTicks,
-      IsPaused: false,
-      CanSeek: true,
-      AudioStreamIndex: active.audioStreamIndex,
-      SubtitleStreamIndex: active.subtitleStreamIndex,
-    })
-    sendStatus({ type: 'progress', itemId: active.itemId, positionTicks, durationSeconds: active.durationSeconds })
-  } catch {
-    // MPV may close before the final progress request; playback itself remains valid.
-  } finally {
-    active.progressBusy = false
+  if (!active || active.stopped || !client) return
+  if (active.progressPromise) {
+    await active.progressPromise
+    if (!force) return
   }
-}
-
-async function finishPlayback(active: ActivePlayback, code: number | null): Promise<void> {
-  if (active.stopped) return
-  clearInterval(active.progressTimer)
-  await reportActiveProgress(true)
-  active.stopped = true
-  const client = embyClient
-  if (client) {
+  if (!active.positionFresh && !active.isPaused) return
+  active.progressBusy = true
+  const progressPromise = (async () => {
     try {
-      await client.reportStopped({
+      const positionTicks = Math.max(0, Math.round(active.positionSeconds * 10_000_000))
+      await client.reportProgress({
         ItemId: active.itemId,
         MediaSourceId: active.source.Id,
         PlaySessionId: active.playbackInfo.PlaySessionId,
-        PositionTicks: Math.max(0, Math.round(active.positionSeconds * 10_000_000)),
+        PlayMethod: active.source.SupportsDirectPlay ? 'DirectPlay' : 'DirectStream',
+        PositionTicks: positionTicks,
+        IsPaused: active.isPaused,
         CanSeek: true,
         AudioStreamIndex: active.audioStreamIndex,
         SubtitleStreamIndex: active.subtitleStreamIndex,
       })
-    } catch {
-      // Server-side progress is best effort when MPV has already exited.
+      active.positionFresh = false
+      active.syncError = undefined
+      sendStatus({ type: 'progress', itemId: active.itemId, positionTicks, durationSeconds: active.durationSeconds, isPaused: active.isPaused })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Emby 进度上报失败'
+      active.syncError = message
+      sendStatus({ type: 'sync-error', itemId: active.itemId, message })
+    } finally {
+      active.progressBusy = false
+      active.progressPromise = undefined
     }
+  })()
+  active.progressPromise = progressPromise
+  await progressPromise
+}
+
+async function readLatestMpvState(active: ActivePlayback): Promise<void> {
+  if (!active.ipc || active.ipc === null) return
+  try {
+    const [position, duration, paused] = await Promise.all([
+      active.ipc.getProperty('time-pos', 800),
+      active.ipc.getProperty('duration', 800),
+      active.ipc.getProperty('pause', 800),
+    ])
+    if (typeof position === 'number' && Number.isFinite(position)) {
+      active.positionSeconds = Math.max(0, position)
+      active.positionFresh = true
+      active.positionObserved = true
+    }
+    if (typeof duration === 'number' && Number.isFinite(duration)) active.durationSeconds = Math.max(0, duration)
+    if (typeof paused === 'boolean') active.isPaused = paused
+  } catch {
+    // The last observed property values remain the best available checkpoint.
   }
-  if (activePlayback === active) activePlayback = null
-  sendStatus({ type: 'stopped', itemId: active.itemId, message: code === 0 ? '播放结束' : 'MPV 已退出' })
+}
+
+async function finishPlayback(active: ActivePlayback, code: number | null, terminate = false): Promise<void> {
+  if (active.finalizePromise) {
+    await active.finalizePromise
+    return
+  }
+  active.finalizing = true
+  active.finalizePromise = (async () => {
+    clearInterval(active.progressTimer)
+    await readLatestMpvState(active)
+    if (!active.positionObserved && !active.syncError) active.syncError = '未能取得 MPV 的最终播放位置'
+    await reportActiveProgress(true)
+    active.ipcCloseListener?.()
+    active.ipcCloseListener = undefined
+    active.ipc?.close()
+    const client = embyClient
+    let syncError = active.syncError
+    if (client) {
+      try {
+        await client.reportStopped({
+          ItemId: active.itemId,
+          MediaSourceId: active.source.Id,
+          PlaySessionId: active.playbackInfo.PlaySessionId,
+          PlayMethod: active.source.SupportsDirectPlay ? 'DirectPlay' : 'DirectStream',
+          PositionTicks: Math.max(0, Math.round(active.positionSeconds * 10_000_000)),
+          CanSeek: true,
+          IsPaused: active.isPaused,
+          AudioStreamIndex: active.audioStreamIndex,
+          SubtitleStreamIndex: active.subtitleStreamIndex,
+        })
+      } catch (error) {
+        syncError = error instanceof Error ? error.message : 'Emby 播放结束状态上报失败'
+      }
+    }
+    active.syncError = syncError
+    active.stopped = true
+    if (activePlayback === active) activePlayback = null
+    if (terminate && !active.process.killed) active.process.kill()
+    sendStatus({
+      type: 'stopped',
+      itemId: active.itemId,
+      positionTicks: Math.max(0, Math.round(active.positionSeconds * 10_000_000)),
+      syncError,
+      message: syncError || (code === 0 ? '播放结束' : 'MPV 已退出'),
+    })
+  })()
+  await active.finalizePromise
 }
 
 async function stopActivePlayback(): Promise<void> {
   const active = activePlayback
   if (!active) return
-  clearInterval(active.progressTimer)
+  await finishPlayback(active, null, true)
+}
+
+async function attachMpvIpc(active: ActivePlayback): Promise<void> {
+  const ipc = new MpvIpc(active.pipeName)
+  active.ipc = ipc
   try {
-    await reportActiveProgress(true)
-  } catch {
-    // Continue to terminate MPV even if the server cannot be reached.
+    await ipc.connectWithRetry()
+    if (active.stopped || active.finalizing) {
+      ipc.close()
+      return
+    }
+    const removeEventListener = ipc.onEvent((message) => {
+      if (message.event === 'property-change') {
+        if (message.name === 'time-pos' && typeof message.data === 'number' && Number.isFinite(message.data)) {
+          active.positionSeconds = Math.max(0, message.data)
+          active.positionFresh = true
+          active.positionObserved = true
+          const now = Date.now()
+          if (now - active.lastStatusAt >= 500) {
+            active.lastStatusAt = now
+            sendStatus({ type: 'progress', itemId: active.itemId, positionTicks: Math.round(active.positionSeconds * 10_000_000), durationSeconds: active.durationSeconds, isPaused: active.isPaused })
+          }
+        } else if (message.name === 'duration' && typeof message.data === 'number' && Number.isFinite(message.data)) {
+          active.durationSeconds = Math.max(0, message.data)
+        } else if (message.name === 'pause' && typeof message.data === 'boolean') {
+          active.isPaused = message.data
+          void reportActiveProgress(true)
+        }
+      } else if (message.event === 'end-file') {
+        void finishPlayback(active, 0)
+      } else if (message.event === 'ipc-closed' && !active.stopped && !active.finalizing) {
+        active.syncError = 'MPV 进度接口连接已断开'
+        sendStatus({ type: 'sync-error', itemId: active.itemId, message: active.syncError })
+      }
+    })
+    active.ipcCloseListener = removeEventListener
+    await Promise.all([
+      ipc.observeProperty(1, 'time-pos'),
+      ipc.observeProperty(2, 'duration'),
+      ipc.observeProperty(3, 'pause'),
+    ])
+    const [position, duration, paused] = await Promise.all([
+      ipc.getProperty('time-pos'),
+      ipc.getProperty('duration'),
+      ipc.getProperty('pause'),
+    ])
+    if (typeof position === 'number' && Number.isFinite(position)) {
+      active.positionSeconds = Math.max(0, position)
+      active.positionFresh = true
+    }
+    if (typeof duration === 'number' && Number.isFinite(duration)) active.durationSeconds = Math.max(0, duration)
+    if (typeof paused === 'boolean') active.isPaused = paused
+    sendStatus({ type: 'progress', itemId: active.itemId, positionTicks: Math.round(active.positionSeconds * 10_000_000), durationSeconds: active.durationSeconds, isPaused: active.isPaused })
+  } catch (error) {
+    if (active.stopped || active.finalizing) return
+    active.syncError = error instanceof Error ? error.message : '无法连接 MPV 进度接口'
+    sendStatus({ type: 'sync-error', itemId: active.itemId, message: active.syncError })
+    ipc.close()
   }
-  active.stopped = true
-  if (!active.process.killed) active.process.kill()
-  activePlayback = null
 }
 
 async function launchMpv(request: PlayRequest): Promise<{ itemId: string; sourceName: string }> {
@@ -264,6 +342,7 @@ async function launchMpv(request: PlayRequest): Promise<{ itemId: string; source
     audioStreamIndex: request.audioStreamIndex,
     subtitleStreamIndex: request.subtitleStreamIndex,
     startTimeTicks,
+    playSessionId: playbackInfo.PlaySessionId,
   })
   const pipeName = `\\\\.\\pipe\\ember-player-${randomUUID()}`
   const args = [
@@ -286,14 +365,21 @@ async function launchMpv(request: PlayRequest): Promise<{ itemId: string; source
     playbackInfo,
     process: child,
     pipeName,
+    ipc: null,
     positionSeconds: startTimeTicks / 10_000_000,
+    positionFresh: false,
+    positionObserved: false,
+    isPaused: false,
     progressTimer: setInterval(() => void reportActiveProgress(), 10_000),
     progressBusy: false,
     stopped: false,
+    finalizing: false,
+    lastStatusAt: 0,
     audioStreamIndex: request.audioStreamIndex,
     subtitleStreamIndex: request.subtitleStreamIndex,
   }
   activePlayback = active
+  void attachMpvIpc(active)
 
   child.once('error', async (error) => {
     await finishPlayback(active, null)
@@ -313,8 +399,9 @@ async function launchMpv(request: PlayRequest): Promise<{ itemId: string; source
       AudioStreamIndex: request.audioStreamIndex,
       SubtitleStreamIndex: request.subtitleStreamIndex,
     })
-  } catch {
-    // MPV can keep playing even if the optional Emby session notification fails.
+  } catch (error) {
+    active.syncError = error instanceof Error ? error.message : 'Emby 播放开始状态上报失败'
+    sendStatus({ type: 'sync-error', itemId: request.itemId, message: active.syncError })
   }
   sendStatus({ type: 'started', itemId: request.itemId })
   return { itemId: request.itemId, sourceName: source.Name || source.Container || 'Emby 视频源' }
@@ -341,7 +428,7 @@ function registerIpc(): void {
     storedSettings.encryptedToken = safeStorage.isEncryptionAvailable()
       ? safeStorage.encryptString(result.AccessToken).toString('base64')
       : undefined
-    embyClient = new EmbyClient(serverUrl, result.AccessToken, result.User.Id)
+    embyClient = new EmbyClient(serverUrl, result.AccessToken, result.User.Id, storedSettings.deviceId)
     persistSettings()
     return { settings: publicSettings(), user: result.User }
   })
@@ -425,6 +512,11 @@ app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
-app.on('before-quit', () => {
-  if (activePlayback && !activePlayback.process.killed) activePlayback.process.kill()
+let quitting = false
+
+app.on('before-quit', (event) => {
+  if (quitting || !activePlayback) return
+  event.preventDefault()
+  quitting = true
+  void stopActivePlayback().finally(() => app.quit())
 })

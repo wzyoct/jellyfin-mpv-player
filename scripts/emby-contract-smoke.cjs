@@ -3,10 +3,12 @@ const { EmbyClient } = require('../dist-electron/electron/emby.js')
 
 let responseBody = null
 let lastUrl = ''
+let lastInit = null
 const originalFetch = global.fetch
 
-global.fetch = async (url) => {
+global.fetch = async (url, init) => {
   lastUrl = String(url)
+  lastInit = init
   return new Response(JSON.stringify(responseBody), {
     status: 200,
     headers: { 'content-type': 'application/json' },
@@ -23,6 +25,7 @@ async function run() {
   const views = await client.getViews()
   assert.deepEqual(views, responseBody.Items)
   assert.match(lastUrl, /\/emby\/Users\/user\/Views$/)
+  assert.match(lastInit.headers.get('X-Emby-Authorization'), /DeviceId="ember-player"/)
 
   responseBody = {
     Items: [{ Id: 'movie-1', Name: '测试电影', Type: 'Movie' }],
@@ -48,6 +51,12 @@ async function run() {
   }
   await client.getItems({ includeItemTypes: 'Movie,Episode', filters: 'IsResumable', sortBy: 'DatePlayed' })
   assert.equal(new URL(lastUrl).searchParams.get('Filters'), 'IsResumable')
+
+  await client.reportProgress({ ItemId: 'resume-1', PositionTicks: 12_000_000, IsPaused: false })
+  assert.equal(JSON.parse(lastInit.body).PositionTicks, 12_000_000)
+
+  const streamUrl = client.buildStreamUrl('resume-1', { Id: 'source-1' }, { playSessionId: 'session-1' })
+  assert.equal(new URL(streamUrl).searchParams.get('PlaySessionId'), 'session-1')
 
   responseBody = { Items: [] }
   await assert.rejects(() => client.getViews(), /缺少 Items 或 TotalRecordCount/)

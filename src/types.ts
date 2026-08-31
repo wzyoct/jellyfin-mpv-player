@@ -151,11 +151,25 @@ export interface PlayRequest {
 }
 
 export interface MpvStatus {
-  type: 'started' | 'progress' | 'stopped' | 'error'
+  type: 'started' | 'progress' | 'sync-error' | 'stopped' | 'error'
   itemId?: string
   positionTicks?: number
   durationSeconds?: number
+  isPaused?: boolean
+  syncError?: string
   message?: string
+}
+
+export interface PlaybackReportPayload {
+  ItemId: string
+  MediaSourceId?: string
+  PlaySessionId?: string
+  PlayMethod?: string
+  PositionTicks?: number
+  IsPaused?: boolean
+  CanSeek?: boolean
+  AudioStreamIndex?: number
+  SubtitleStreamIndex?: number
 }
 
 export interface EmberApi {

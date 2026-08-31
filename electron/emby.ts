@@ -6,13 +6,15 @@ import type {
   ItemResult,
   MediaSourceInfo,
   PlaybackInfo,
+  PlaybackReportPayload,
   QueryResult,
   RecommendationDto,
 } from '../src/types'
 
 export type { MediaSourceInfo, PlaybackInfo } from '../src/types'
 
-const CLIENT_HEADER = `MediaBrowser Client="Ember Player", Device="Windows", DeviceId="ember-player", Version="${packageInfo.version}"`
+const CLIENT_HEADER = `MediaBrowser Client="Ember Player", Device="Windows", Version="${packageInfo.version}"`
+const REQUEST_TIMEOUT_MS = 15_000
 
 export interface AuthResponse {
   AccessToken: string
@@ -62,11 +64,13 @@ export class EmbyClient {
   readonly baseUrl: string
   readonly token: string
   readonly userId: string
+  readonly deviceId: string
 
-  constructor(baseUrl: string, token: string, userId: string) {
+  constructor(baseUrl: string, token: string, userId: string, deviceId = 'ember-player') {
     this.baseUrl = normalizeServerUrl(baseUrl)
     this.token = token
     this.userId = userId
+    this.deviceId = deviceId
   }
 
   static async authenticate(baseUrl: string, username: string, password: string): Promise<AuthResponse> {
@@ -81,12 +85,19 @@ export class EmbyClient {
   async request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const headers = new Headers(init.headers)
     headers.set('Accept', 'application/json')
-    headers.set('X-Emby-Authorization', CLIENT_HEADER)
+    headers.set('X-Emby-Authorization', this.clientHeader())
     if (this.token) {
       headers.set('X-MediaBrowser-Token', this.token)
     }
 
-    const response = await fetch(this.resolveUrl(path), { ...init, headers })
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+    let response: Response
+    try {
+      response = await fetch(this.resolveUrl(path), { ...init, headers, signal: init.signal || controller.signal })
+    } finally {
+      clearTimeout(timer)
+    }
     if (!response.ok) {
       const body = await response.text().catch(() => '')
       throw new Error(`Emby 请求失败（${response.status}）：${body.slice(0, 180) || response.statusText}`)
@@ -100,11 +111,18 @@ export class EmbyClient {
 
   async requestBinary(path: string): Promise<{ mimeType: string; data: string }> {
     const headers = new Headers()
-    headers.set('X-Emby-Authorization', CLIENT_HEADER)
+    headers.set('X-Emby-Authorization', this.clientHeader())
     if (this.token) {
       headers.set('X-MediaBrowser-Token', this.token)
     }
-    const response = await fetch(this.resolveUrl(path), { headers })
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+    let response: Response
+    try {
+      response = await fetch(this.resolveUrl(path), { headers, signal: controller.signal })
+    } finally {
+      clearTimeout(timer)
+    }
     if (!response.ok) {
       throw new Error(`图片请求失败（${response.status}）`)
     }
@@ -203,6 +221,7 @@ export class EmbyClient {
     audioStreamIndex?: number
     subtitleStreamIndex?: number
     startTimeTicks?: number
+    playSessionId?: string
   }): string {
     const rawUrl = source.DirectStreamUrl || `/Videos/${encodeURIComponent(itemId)}/stream`
     const url = new URL(this.resolveUrl(rawUrl))
@@ -213,6 +232,7 @@ export class EmbyClient {
     if (options.audioStreamIndex !== undefined) url.searchParams.set('AudioStreamIndex', String(options.audioStreamIndex))
     if (options.subtitleStreamIndex !== undefined) url.searchParams.set('SubtitleStreamIndex', String(options.subtitleStreamIndex))
     if (options.startTimeTicks) url.searchParams.set('StartTimeTicks', String(Math.round(options.startTimeTicks)))
+    if (options.playSessionId) url.searchParams.set('PlaySessionId', options.playSessionId)
     return url.toString()
   }
 
@@ -222,7 +242,7 @@ export class EmbyClient {
     return url.toString()
   }
 
-  async reportPlaying(payload: Record<string, unknown>): Promise<void> {
+  async reportPlaying(payload: PlaybackReportPayload): Promise<void> {
     await this.request('/Sessions/Playing', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -230,7 +250,7 @@ export class EmbyClient {
     })
   }
 
-  async reportProgress(payload: Record<string, unknown>): Promise<void> {
+  async reportProgress(payload: PlaybackReportPayload): Promise<void> {
     await this.request('/Sessions/Playing/Progress', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -238,11 +258,15 @@ export class EmbyClient {
     })
   }
 
-  async reportStopped(payload: Record<string, unknown>): Promise<void> {
+  async reportStopped(payload: PlaybackReportPayload): Promise<void> {
     await this.request('/Sessions/Playing/Stopped', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     })
+  }
+
+  private clientHeader(): string {
+    return `${CLIENT_HEADER}, DeviceId="${this.deviceId}"`
   }
 }
