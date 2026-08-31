@@ -7,6 +7,9 @@ export interface MpvIpcMessage {
   name?: string
   data?: unknown
   error?: string
+  reason?: string
+  file_error?: string
+  playlist_entry_id?: number
 }
 
 export interface ParsedJsonLines {

@@ -46,6 +46,22 @@ async function run() {
   assert.match(lastUrl, /\/emby\/Movies\/Recommendations\?/)
 
   responseBody = {
+    Items: [{ Id: 'next-1', Name: '下一集', Type: 'Episode', SeriesId: 'series-1' }],
+    TotalRecordCount: 1,
+  }
+  const nextUp = await client.getNextUp('series-1')
+  assert.deepEqual(nextUp.Items, responseBody.Items)
+  assert.equal(new URL(lastUrl).searchParams.get('SeriesId'), 'series-1')
+
+  responseBody = {
+    Items: [{ Id: 'episode-1', Name: '第一集', Type: 'Episode' }],
+    TotalRecordCount: 1,
+  }
+  const episodes = await client.getSeriesEpisodes('series-1')
+  assert.deepEqual(episodes, responseBody.Items)
+  assert.equal(new URL(lastUrl).searchParams.get('SeriesId'), 'series-1')
+
+  responseBody = {
     Items: [{ Id: 'resume-1', Name: '续播电影', Type: 'Movie' }],
     TotalRecordCount: 1,
   }

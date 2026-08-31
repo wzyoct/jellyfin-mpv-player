@@ -150,6 +150,7 @@ export class EmbyClient {
     limit?: number
     isResumable?: boolean
     filters?: string
+    seriesId?: string
   } = {}): Promise<ItemResult> {
     const params = new URLSearchParams({
       UserId: this.userId,
@@ -165,6 +166,7 @@ export class EmbyClient {
       ImageTypeLimit: '1',
     })
     if (options.parentId) params.set('ParentId', options.parentId)
+    if (options.seriesId) params.set('SeriesId', options.seriesId)
     if (options.searchTerm) params.set('SearchTerm', options.searchTerm)
     if (options.filters) params.set('Filters', options.filters)
     if (options.isResumable) params.set('Filters', 'IsResumable')
@@ -203,6 +205,55 @@ export class EmbyClient {
   async getPlaybackInfo(itemId: string): Promise<PlaybackInfo> {
     const params = new URLSearchParams({ UserId: this.userId })
     return this.request(`/Items/${encodeURIComponent(itemId)}/PlaybackInfo?${params.toString()}`)
+  }
+
+  async getNextUp(seriesId?: string): Promise<ItemResult> {
+    const params = new URLSearchParams({
+      UserId: this.userId,
+      Limit: '100',
+      Fields: 'Overview,MediaStreams,DateCreated,UserData',
+      EnableImages: 'true',
+      EnableUserData: 'true',
+      ImageTypeLimit: '1',
+    })
+    if (seriesId) params.set('SeriesId', seriesId)
+    return parseQueryResult<EmbyItem>(
+      await this.request(`/Shows/NextUp?${params.toString()}`),
+      '/Shows/NextUp',
+    ) as ItemResult
+  }
+
+  async getSeriesEpisodes(seriesId: string): Promise<EmbyItem[]> {
+    const items: EmbyItem[] = []
+    let startIndex = 0
+    let totalRecordCount = Number.POSITIVE_INFINITY
+    let pageCount = 0
+    while (startIndex < totalRecordCount && pageCount < 200) {
+      const params = new URLSearchParams({
+        UserId: this.userId,
+        SeriesId: seriesId,
+        IncludeItemTypes: 'Episode',
+        Recursive: 'true',
+        SortBy: 'ParentIndexNumber,IndexNumber,SortName',
+        SortOrder: 'Ascending',
+        StartIndex: String(startIndex),
+        Limit: '100',
+        Fields: 'Overview,MediaStreams,DateCreated,UserData',
+        EnableImages: 'true',
+        EnableUserData: 'true',
+        ImageTypeLimit: '1',
+      })
+      const result = parseQueryResult<EmbyItem>(
+        await this.request(`/Users/${encodeURIComponent(this.userId)}/Items?${params.toString()}`),
+        '/Users/{UserId}/Items',
+      ) as ItemResult
+      items.push(...result.Items)
+      totalRecordCount = result.TotalRecordCount
+      if (!result.Items.length) break
+      startIndex += result.Items.length
+      pageCount += 1
+    }
+    return items
   }
 
   async getImage(itemId: string, imageType: string, tag?: string, maxWidth = 480): Promise<string> {

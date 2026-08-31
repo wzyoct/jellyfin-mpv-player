@@ -3,7 +3,8 @@ import type {
   EmberApi,
   ImageRequest,
   ItemsQuery,
-  PlayRequest,
+  PlaybackCommand,
+  StartPlaybackRequest,
   SettingsInput,
 } from '../src/types'
 
@@ -17,13 +18,18 @@ const api: EmberApi = {
   getMovieRecommendations: () => ipcRenderer.invoke('emby:get-movie-recommendations'),
   getItem: (itemId: string) => ipcRenderer.invoke('emby:get-item', itemId),
   getPlaybackInfo: (itemId: string) => ipcRenderer.invoke('emby:get-playback-info', itemId),
+  getNextUp: (seriesId?: string) => ipcRenderer.invoke('emby:get-next-up', seriesId),
+  getSeriesEpisodes: (seriesId: string) => ipcRenderer.invoke('emby:get-series-episodes', seriesId),
   getImage: (request: ImageRequest) => ipcRenderer.invoke('emby:get-image', request),
-  play: (request: PlayRequest) => ipcRenderer.invoke('mpv:play', request),
-  stop: () => ipcRenderer.invoke('mpv:stop'),
-  onMpvStatus: (callback) => {
+  validateMpvPath: (path?: string) => ipcRenderer.invoke('mpv:validate', path),
+  testMpvPath: (path?: string) => ipcRenderer.invoke('mpv:test', path),
+  playbackStart: (request: StartPlaybackRequest) => ipcRenderer.invoke('playback:start', request),
+  playbackCommand: (request: PlaybackCommand) => ipcRenderer.invoke('playback:command', request),
+  getPlaybackSnapshot: () => ipcRenderer.invoke('playback:snapshot'),
+  onPlaybackChanged: (callback) => {
     const listener = (_event: Electron.IpcRendererEvent, status: Parameters<typeof callback>[0]) => callback(status)
-    ipcRenderer.on('mpv:status', listener)
-    return () => ipcRenderer.removeListener('mpv:status', listener)
+    ipcRenderer.on('playback:changed', listener)
+    return () => ipcRenderer.removeListener('playback:changed', listener)
   },
 }
 
