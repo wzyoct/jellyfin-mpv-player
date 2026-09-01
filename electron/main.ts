@@ -6,6 +6,7 @@ import { dirname, join } from 'node:path'
 import { EmbyClient, normalizeServerUrl, type MediaSourceInfo, type PlaybackInfo } from './emby'
 import { MpvIpc, type MpvIpcMessage } from './mpvIpc'
 import { buildMpvHttpHeaders } from './mpvHeaders'
+import { normalizeMpvPath } from './mpvPath'
 import { logger } from './logger'
 import { buildEpisodeQueue } from '../src/playbackQueue'
 import { chooseDefaultSubtitle } from '../src/subtitlePreference'
@@ -122,7 +123,7 @@ function readSettings(): void {
     storedSettings = {
       ...storedSettings,
       ...persisted,
-      mpvPath: persisted.mpvPath || 'mpv.exe',
+      mpvPath: normalizeMpvPath(persisted.mpvPath),
       deviceId: persisted.deviceId || randomUUID(),
     }
     persistSettings()
@@ -159,7 +160,8 @@ function publicSettings() {
 }
 
 function resolveMpvPath(candidate?: string): string {
-  return (candidate || storedSettings.mpvPath || 'mpv.exe').trim()
+  const selected = typeof candidate === 'string' && candidate.trim() ? candidate : storedSettings.mpvPath
+  return normalizeMpvPath(selected)
 }
 
 function validateMpvPath(candidate?: string): { path: string; version?: string; message: string } {
@@ -608,7 +610,7 @@ async function startPlayback(request: StartPlaybackRequest): Promise<PlaybackSna
     `--input-ipc-server=${pipeName}`,
   ]
   logger.info('playback', 'start', { sessionId: session.sessionId, queueLength: session.queue.length, resume: resumeTicks > 0 })
-  const child = spawn(storedSettings.mpvPath || 'mpv.exe', args, { windowsHide: false, stdio: ['ignore', 'ignore', 'pipe'] })
+  const child = spawn(resolveMpvPath(), args, { windowsHide: false, stdio: ['ignore', 'ignore', 'pipe'] })
   session.process = child
   activeSession = session
   session.progressTimer = setInterval(() => void reportActiveProgress(), 10_000)
@@ -716,7 +718,7 @@ function registerIpc(): void {
     if (nextUrl !== storedSettings.serverUrl) embyClient = null
     storedSettings.serverUrl = nextUrl
     storedSettings.username = input.username.trim()
-    storedSettings.mpvPath = input.mpvPath.trim() || 'mpv.exe'
+    storedSettings.mpvPath = normalizeMpvPath(input.mpvPath)
     persistSettings()
     return publicSettings()
   })
@@ -726,7 +728,7 @@ function registerIpc(): void {
     storedSettings.serverUrl = serverUrl
     storedSettings.username = input.username.trim()
     storedSettings.userId = result.User.Id
-    storedSettings.mpvPath = input.mpvPath.trim() || 'mpv.exe'
+    storedSettings.mpvPath = normalizeMpvPath(input.mpvPath)
     storedSettings.encryptedToken = safeStorage.isEncryptionAvailable()
       ? safeStorage.encryptString(result.AccessToken).toString('base64')
       : undefined

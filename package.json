@@ -1,6 +1,6 @@
 {
   "name": "ember-player",
-  "version": "0.8.3",
+  "version": "0.8.4",
   "description": "A focused Emby desktop client powered by MPV.",
   "productName": "Ember Player",
   "main": "dist-electron/electron/main.js",
@@ -10,8 +10,8 @@
     "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron .\"",
     "build": "npm run build:renderer && npm run build:electron",
     "build:renderer": "vite build",
-    "build:electron": "tsc -p electron/tsconfig.json",
-    "test:contract": "npm run build:electron && node scripts/emby-contract-smoke.cjs",
+    "build:electron": "tsc -p electron/tsconfig.json && vite build --config vite.preload.config.ts",
+    "test:contract": "npm run build:electron && node scripts/preload-contract-smoke.cjs && node scripts/emby-contract-smoke.cjs",
     "test": "vitest run",
     "typecheck": "vue-tsc --noEmit && tsc -p electron/tsconfig.json --noEmit",
     "release:check": "node scripts/check-version.cjs",
