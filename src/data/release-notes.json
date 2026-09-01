@@ -1,5 +1,20 @@
 [
   {
+    "version": "1.0.4",
+    "date": "2026-09-01",
+    "summary": "恢复 MPV 剧集选集、连续播放与 MediaWarp STRM 播放。",
+    "sections": [
+      {
+        "title": "修复",
+        "items": [
+          "连接入口强制校验 MediaWarp 0.2.4 及 Jellyfin 10.11.x，旧 Jellyfin 直连地址会给出明确提示。",
+          "电视剧完整目录立即交给 MPV，按集解析 PlaybackInfo 并预热下一集；不同集独立选择媒体源和轨道。",
+          "完善 MediaWarp STRM 302、Range、必需请求头、重定向循环和 60 秒播放信息及首包超时诊断。"
+        ]
+      }
+    ]
+  },
+  {
     "version": "1.0.3",
     "date": "2026-09-01",
     "summary": "为电视剧播放增加可见的 MPV 选集按钮。",
