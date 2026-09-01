@@ -10,6 +10,7 @@ async function listen(handler: Parameters<typeof createServer>[0]): Promise<{ se
   const requests: Array<{ headers: Record<string, string | string[] | undefined>; url?: string }> = []
   const server = createServer((request, response) => {
     requests.push({ headers: request.headers, url: request.url })
+    response.setHeader('Connection', 'close')
     handler(request, response)
   })
   servers.push(server)
