@@ -43,3 +43,4 @@
 - 任何面向用户的更新都必须同步递增 `package.json` 和 `package-lock.json` 的版本号，并补充结构化更新记录。
 - `src/data/release-notes.json` 是版本记录的单一来源；`CHANGELOG.md` 必须通过发布脚本从该文件生成，禁止只保留 `Unreleased` 而不结算正式版本。
 - 发布前必须运行 `npm run release:check`，确保包版本、锁文件、更新记录和客户端运行时版本一致。
+- 桌面端用户可见改动在源码验证和构建后，必须继续运行 `npm run release:windows` 重新生成 `release/Ember Player.exe`；交付前核对便携版启动说明中的版本号和 exe 的更新时间，不能只交付 `dist` 或 `dist-electron`。
