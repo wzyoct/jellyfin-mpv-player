@@ -250,6 +250,9 @@ export interface EmberApi {
   getNextUp(seriesId?: string): Promise<ItemResult>
   getSeriesEpisodes(seriesId: string): Promise<EmbyItem[]>
   getImage(request: ImageRequest): Promise<string>
+  getFullScreen(): Promise<boolean>
+  setFullScreen(enabled: boolean): Promise<boolean>
+  onFullScreenChanged(callback: (enabled: boolean) => void): () => void
   validateMpvPath(path?: string): Promise<MpvValidationResult>
   testMpvPath(path?: string): Promise<MpvValidationResult>
   openLogDirectory(): Promise<void>

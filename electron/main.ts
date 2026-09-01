@@ -855,6 +855,12 @@ function registerIpc(): void {
       throw new Error('无法打开日志目录')
     }
   })
+  ipcMain.handle('window:get-full-screen', () => Boolean(mainWindow?.isFullScreen()))
+  ipcMain.handle('window:set-full-screen', (_event, enabled: boolean) => {
+    if (!mainWindow || mainWindow.isDestroyed()) throw new Error('窗口已关闭')
+    mainWindow.setFullScreen(enabled === true)
+    return mainWindow.isFullScreen()
+  })
   ipcMain.handle('settings:get', () => publicSettings())
   ipcMain.handle('settings:save', (_event, input: { serverUrl: string; username: string; mpvPath: string }) => {
     const nextUrl = normalizeServerUrl(input.serverUrl)
@@ -956,6 +962,12 @@ function createWindow(): void {
   })
   mainWindow.webContents.on('render-process-gone', (_event, details) => {
     logger.error('window', 'render-process-gone', new Error(details.reason), { exitCode: details.exitCode })
+  })
+  mainWindow.on('enter-full-screen', () => {
+    mainWindow?.webContents.send('window:full-screen-changed', true)
+  })
+  mainWindow.on('leave-full-screen', () => {
+    mainWindow?.webContents.send('window:full-screen-changed', false)
   })
   if (!app.isPackaged) {
     void mainWindow.loadURL('http://127.0.0.1:5173')

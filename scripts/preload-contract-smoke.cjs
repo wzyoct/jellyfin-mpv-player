@@ -60,6 +60,9 @@ const expectedMethods = [
   'getNextUp',
   'getSeriesEpisodes',
   'getImage',
+  'getFullScreen',
+  'setFullScreen',
+  'onFullScreenChanged',
   'validateMpvPath',
   'testMpvPath',
   'openLogDirectory',
@@ -74,6 +77,11 @@ for (const method of expectedMethods) assert.equal(typeof exposedApi[method], 'f
 async function run() {
   await exposedApi.validateMpvPath('C:\\green\\mpv\\mpv.exe')
   assert.deepEqual(calls.at(-1), ['mpv:validate', 'C:\\green\\mpv\\mpv.exe'])
+
+  await exposedApi.getFullScreen()
+  assert.deepEqual(calls.at(-1), ['window:get-full-screen'])
+  await exposedApi.setFullScreen(true)
+  assert.deepEqual(calls.at(-1), ['window:set-full-screen', true])
 
   pendingError = new Error("Error invoking remote method 'mpv:validate': Error: MPV IPC 参数无效")
   await assert.rejects(exposedApi.validateMpvPath(), /MPV IPC 参数无效/)

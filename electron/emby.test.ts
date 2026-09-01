@@ -134,6 +134,9 @@ describe('EmbyClient', () => {
     await expect(client.getPlaybackInfo('movie-1')).resolves.toEqual(playback)
     await expect(client.getNextUp()).resolves.toEqual({ Items: [], TotalRecordCount: 0 })
     expect(new URL(fetchMock.mock.calls[4][0]).searchParams.has('SeriesId')).toBe(false)
+    const recommendationUrl = new URL(fetchMock.mock.calls[1][0])
+    expect(recommendationUrl.searchParams.get('Fields')).toBe('Overview')
+    expect(recommendationUrl.searchParams.get('EnableImageTypes')).toBe('Primary,Backdrop,Thumb')
   })
 
   it('validates query response shapes and recommendation arrays', async () => {

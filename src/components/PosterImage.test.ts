@@ -44,6 +44,16 @@ describe('PosterImage', () => {
     expect(loaded).toHaveBeenCalledTimes(2)
   })
 
+  it('uses an explicit maximum width when provided', async () => {
+    const getImage = vi.mocked(window.emby.getImage)
+    getImage.mockResolvedValue('data:image/jpeg;base64,wide')
+    mount(PosterImage, { props: { item: item(), eager: true, maxWidth: 3840 } })
+
+    await flushPromises()
+
+    expect(getImage).toHaveBeenCalledWith({ itemId: 'item-1', imageType: 'Primary', tag: 'primary-1', maxWidth: 3840 })
+  })
+
   it('tries the next backdrop candidate when an earlier image fails', async () => {
     const getImage = vi.mocked(window.emby.getImage)
     const season = item({ Id: 'season-1', Name: '第一季', Type: 'Season', BackdropImageTags: ['season-backdrop'] })

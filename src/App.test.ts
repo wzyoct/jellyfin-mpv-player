@@ -52,6 +52,9 @@ function createApi(overrides: Partial<Record<keyof EmberApi, unknown>> = {}): Em
     getNextUp: vi.fn(async () => ({ Items: [], TotalRecordCount: 0 })),
     getSeriesEpisodes: vi.fn(async () => []),
     getImage: vi.fn(async () => 'data:image/jpeg;base64,test'),
+    getFullScreen: vi.fn(async () => false),
+    setFullScreen: vi.fn(async (enabled: boolean) => enabled),
+    onFullScreenChanged: vi.fn(() => vi.fn()),
     validateMpvPath: vi.fn(async () => ({ valid: true, path: 'mpv.exe', message: 'MPV 路径和版本有效' })),
     testMpvPath: vi.fn(async () => ({ valid: true, path: 'mpv.exe', message: 'MPV 测试启动成功' })),
     openLogDirectory: vi.fn(async () => undefined),
@@ -65,7 +68,7 @@ function createApi(overrides: Partial<Record<keyof EmberApi, unknown>> = {}): Em
 }
 
 const iconNames = [
-  'House', 'Film', 'Tv', 'History', 'Search', 'Settings2', 'CircleUserRound', 'LoaderCircle', 'Check',
+  'House', 'Film', 'Tv', 'History', 'Search', 'Settings2', 'CircleUserRound', 'Maximize2', 'Minimize2', 'LoaderCircle', 'Check',
   'Play', 'FolderOpen', 'AlertCircle', 'LogOut', 'Info', 'ChevronRight', 'Clapperboard', 'RefreshCw',
   'X', 'SkipBack', 'Pause', 'SkipForward', 'Square', 'AlertTriangle', 'Volume2', 'Menu',
 ]
@@ -148,7 +151,19 @@ describe('App', () => {
     expect(wrapper.text()).toContain('最近加入')
     expect(wrapper.text()).toContain('完整媒体库')
     expect(wrapper.text()).toContain('2 项内容')
+    expect(wrapper.text()).toContain('推荐电影 简介')
+    expect(wrapper.text()).not.toContain('打开详情，查看完整介绍与播放选项。')
     expect(vi.mocked(api.getItems).mock.calls.some(([query]) => query?.filters === 'IsResumable')).toBe(true)
+  })
+
+  it('hides the hero description when overview metadata is unavailable', async () => {
+    const api = connectedHomeApi()
+    vi.mocked(api.getMovieRecommendations).mockResolvedValue([{ Items: [{ Id: 'no-overview', Name: '无简介电影', Type: 'Movie' }] }])
+    const wrapper = mountApp(api)
+    await flushPromises()
+
+    expect(wrapper.find('.hero-description').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('打开详情，查看完整介绍与播放选项。')
   })
 
   it('falls back to latest content when recommendations fail', async () => {
@@ -287,6 +302,37 @@ describe('App', () => {
     Object.defineProperty(page, 'scrollTop', { configurable: true, value: 18 })
     await wrapper.get('.page-content').trigger('scroll')
     expect(wrapper.get('header.topbar').classes()).toContain('topbar--scrolled')
+  })
+
+  it('toggles fullscreen from the toolbar and keyboard shortcuts', async () => {
+    const api = connectedHomeApi()
+    let fullScreenListener: ((enabled: boolean) => void) | undefined
+    const removeListener = vi.fn()
+    vi.mocked(api.onFullScreenChanged).mockImplementation((callback) => {
+      fullScreenListener = callback
+      return removeListener
+    })
+    const wrapper = mountApp(api)
+    await flushPromises()
+
+    expect(wrapper.find('button[title="进入全屏"]').exists()).toBe(true)
+    await wrapper.get('button[title="进入全屏"]').trigger('click')
+    await flushPromises()
+    expect(api.setFullScreen).toHaveBeenCalledWith(true)
+
+    fullScreenListener?.(true)
+    await wrapper.vm.$nextTick()
+    expect(wrapper.find('button[title="退出全屏"]').exists()).toBe(true)
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'F11' }))
+    await flushPromises()
+    expect(api.setFullScreen).toHaveBeenLastCalledWith(false)
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+    await flushPromises()
+    expect(api.setFullScreen).toHaveBeenLastCalledWith(false)
+    wrapper.unmount()
+    expect(removeListener).toHaveBeenCalledTimes(1)
   })
 
   it('accepts newer playback snapshots, controls pause, and refreshes after stop', async () => {

@@ -28,6 +28,13 @@ const api: EmberApi = {
   getNextUp: (seriesId?: string) => invoke('emby:get-next-up', seriesId),
   getSeriesEpisodes: (seriesId: string) => invoke('emby:get-series-episodes', seriesId),
   getImage: (request: ImageRequest) => invoke('emby:get-image', request),
+  getFullScreen: () => invoke('window:get-full-screen'),
+  setFullScreen: (enabled: boolean) => invoke('window:set-full-screen', enabled),
+  onFullScreenChanged: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, enabled: boolean) => callback(enabled)
+    ipcRenderer.on('window:full-screen-changed', listener)
+    return () => ipcRenderer.removeListener('window:full-screen-changed', listener)
+  },
   validateMpvPath: (path?: string) => invoke('mpv:validate', path),
   testMpvPath: (path?: string) => invoke('mpv:test', path),
   openLogDirectory: () => invoke('diagnostics:open-log-directory'),

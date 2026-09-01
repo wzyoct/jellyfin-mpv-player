@@ -8,6 +8,7 @@ const props = withDefaults(defineProps<{
   item: EmbyItem
   variant?: 'poster' | 'backdrop'
   eager?: boolean
+  maxWidth?: number
   source?: PosterSource
 }>(), {
   variant: 'poster',
@@ -79,7 +80,7 @@ async function loadCandidate(requestId: number, index: number): Promise<void> {
       itemId: candidate.itemId,
       imageType: candidate.imageType,
       tag: candidate.tag,
-      maxWidth: props.variant === 'backdrop' ? 1280 : 480,
+      maxWidth: props.maxWidth || (props.variant === 'backdrop' ? 1280 : 480),
     })
     if (requestId === loadRequestId) imageUrl.value = nextImageUrl
   } catch {

@@ -15,7 +15,9 @@ import {
   LoaderCircle,
   LogIn,
   LogOut,
+  Maximize2,
   Menu,
+  Minimize2,
   Pause,
   Play,
   RefreshCw,
@@ -57,6 +59,7 @@ const currentRelease = computed(() => releaseNotes.find((release) => release.ver
 
 const settings = ref<PublicSettings | null>(null)
 const appBooted = ref(false)
+const isFullScreen = ref(false)
 const isContentScrolled = ref(false)
 const activePage = ref<Page>('home')
 const activeFilter = ref<LibraryFilter>('all')
@@ -100,6 +103,7 @@ const pageScroll = ref<HTMLElement | null>(null)
 let searchTimer: ReturnType<typeof setTimeout> | undefined
 let noticeTimer: ReturnType<typeof setTimeout> | undefined
 let removePlaybackListener: (() => void) | undefined
+let removeFullScreenListener: (() => void) | undefined
 let focusRefreshTimer: ReturnType<typeof setTimeout> | undefined
 let homeRequestId = 0
 let libraryRequestId = 0
@@ -547,7 +551,29 @@ function focusSearch(): void {
   searchInput.value?.focus()
 }
 
+async function setFullScreen(enabled: boolean): Promise<void> {
+  try {
+    isFullScreen.value = await window.emby.setFullScreen(enabled)
+  } catch (error) {
+    showNotice(error instanceof Error ? error.message : '切换全屏失败', 'error')
+  }
+}
+
+function toggleFullScreen(): void {
+  void setFullScreen(!isFullScreen.value)
+}
+
 function handleKeydown(event: KeyboardEvent): void {
+  if (event.key === 'F11') {
+    event.preventDefault()
+    toggleFullScreen()
+    return
+  }
+  if (event.key === 'Escape' && isFullScreen.value) {
+    event.preventDefault()
+    void setFullScreen(false)
+    return
+  }
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
     event.preventDefault()
     focusSearch()
@@ -779,6 +805,10 @@ onMounted(async () => {
   }
   window.addEventListener('focus', handleWindowFocus)
   try {
+    removeFullScreenListener = window.emby.onFullScreenChanged((enabled) => {
+      isFullScreen.value = enabled
+    })
+    isFullScreen.value = await window.emby.getFullScreen()
     const saved = await window.emby.getSettings()
     applySettings(saved)
     appBooted.value = true
@@ -805,6 +835,7 @@ onUnmounted(() => {
   if (heroTransitionTimer) clearTimeout(heroTransitionTimer)
   if (focusRefreshTimer) clearTimeout(focusRefreshTimer)
   removePlaybackListener?.()
+  removeFullScreenListener?.()
 })
 </script>
 
@@ -843,6 +874,16 @@ onUnmounted(() => {
         </label>
         <button class="icon-button" type="button" title="设置" @click="openSettings">
           <Settings2 :size="18" />
+        </button>
+        <button
+          class="icon-button"
+          type="button"
+          :title="isFullScreen ? '退出全屏' : '进入全屏'"
+          :aria-label="isFullScreen ? '退出全屏' : '进入全屏'"
+          @click="toggleFullScreen"
+        >
+          <Minimize2 v-if="isFullScreen" :size="18" />
+          <Maximize2 v-else :size="18" />
         </button>
         <button class="avatar-button" type="button" title="账户" @click="openSettings">
           <CircleUserRound :size="19" />
@@ -967,6 +1008,7 @@ onUnmounted(() => {
                 class="hero-layer hero-layer--outgoing"
                 variant="backdrop"
                 eager
+                :max-width="3840"
               />
               <PosterImage
                 v-if="heroDisplayedItem"
@@ -976,6 +1018,7 @@ onUnmounted(() => {
                 :class="{ 'hero-layer--visible': heroLoadedId === heroDisplayedItem.Id }"
                 variant="backdrop"
                 eager
+                :max-width="3840"
                 @loaded="handleHeroImageLoaded(heroDisplayedItem.Id)"
                 @failed="handleHeroImageFailed(heroDisplayedItem.Id)"
               />
@@ -992,7 +1035,7 @@ onUnmounted(() => {
                     <span>{{ itemTypeLabel(heroItem) }}</span>
                     <span v-if="heroItem.RunTimeTicks">{{ formatRuntime(heroItem.RunTimeTicks) }}</span>
                   </div>
-                  <p class="hero-description">{{ heroItem.Overview || '打开详情，查看完整介绍与播放选项。' }}</p>
+                  <p v-if="heroItem.Overview?.trim()" class="hero-description">{{ heroItem.Overview.trim() }}</p>
                   <div class="hero-actions">
                     <button class="button button--primary button--large" type="button" @click="playItemDirect(heroItem)">
                       <Play :size="19" fill="currentColor" />{{ resumePosition(heroItem) ? '继续播放' : '播放' }}

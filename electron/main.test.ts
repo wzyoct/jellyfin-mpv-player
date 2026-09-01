@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   spawnSyncMock: vi.fn(),
   fetchMock: vi.fn(),
   writeFileSyncMock: vi.fn(),
+  mainWindow: null as any,
   logger: {
     initialize: vi.fn(),
     info: vi.fn(),
@@ -56,6 +57,8 @@ class FakeMpvIpc {
 
 vi.mock('electron', () => {
   class FakeBrowserWindow {
+    fullScreen = false
+    readonly windowEvents = new Map<string, Handler>()
     static getAllWindows = vi.fn(() => [])
     readonly webContents = {
       once: vi.fn(),
@@ -70,7 +73,20 @@ vi.mock('electron', () => {
     readonly restore = vi.fn()
     readonly loadURL = vi.fn(async () => undefined)
     readonly loadFile = vi.fn(async () => undefined)
-    readonly on = vi.fn()
+    readonly isFullScreen = vi.fn(() => this.fullScreen)
+    readonly setFullScreen = vi.fn((enabled: boolean) => {
+      this.fullScreen = enabled
+    })
+    readonly once = vi.fn((event: string, handler: Handler) => {
+      this.windowEvents.set(event, handler)
+    })
+    readonly on = vi.fn((event: string, handler: Handler) => {
+      this.windowEvents.set(event, handler)
+    })
+
+    constructor() {
+      mocks.mainWindow = this
+    }
   }
 
   return {
@@ -166,6 +182,10 @@ describe('Electron main process IPC orchestration', () => {
     mocks.mpvInstances.length = 0
     mocks.spawnSyncMock.mockReturnValue({ status: 0, stdout: 'mpv 0.41.0', stderr: '' })
     mocks.spawnMock.mockImplementation(() => makeChild())
+    if (mocks.mainWindow) {
+      mocks.mainWindow.fullScreen = false
+      mocks.mainWindow.webContents.send.mockReset()
+    }
   })
 
   afterAll(() => {
@@ -187,6 +207,23 @@ describe('Electron main process IPC orchestration', () => {
       mpvPath: 'C:\\Program Files\\mpv\\mpv.exe',
       connected: false,
     })
+  })
+
+  it('controls fullscreen state and publishes native window events', async () => {
+    expect(await handler('window:get-full-screen')()).toBe(false)
+    expect(handler('window:set-full-screen')({}, true)).toBe(true)
+    expect(mocks.mainWindow.setFullScreen).toHaveBeenCalledWith(true)
+
+    const enterFullScreen = mocks.mainWindow.windowEvents.get('enter-full-screen')
+    expect(enterFullScreen).toBeDefined()
+    enterFullScreen?.()
+    expect(mocks.mainWindow.webContents.send).toHaveBeenCalledWith('window:full-screen-changed', true)
+
+    expect(handler('window:set-full-screen')({}, false)).toBe(false)
+    const leaveFullScreen = mocks.mainWindow.windowEvents.get('leave-full-screen')
+    expect(leaveFullScreen).toBeDefined()
+    leaveFullScreen?.()
+    expect(mocks.mainWindow.webContents.send).toHaveBeenCalledWith('window:full-screen-changed', false)
   })
 
   it('logs in, forwards authenticated API calls, and caches images', async () => {

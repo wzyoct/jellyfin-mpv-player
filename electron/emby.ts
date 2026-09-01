@@ -212,7 +212,9 @@ export class EmbyClient {
       UserId: this.userId,
       CategoryLimit: '2',
       ItemLimit: '8',
+      Fields: 'Overview',
       EnableImages: 'true',
+      EnableImageTypes: 'Primary,Backdrop,Thumb',
       EnableUserData: 'true',
       ImageTypeLimit: '1',
     })
