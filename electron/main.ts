@@ -941,6 +941,12 @@ async function startPlayback(request: StartPlaybackRequest): Promise<PlaybackSna
     '--msg-level=all=warn',
     `--input-ipc-server=${pipeName}`,
   ]
+  if (selectedEntry.item.Type === 'Episode' && session.queue.length > 1) {
+    args.push(
+      '--script-opt=osc-custom_button_1_content=\u2637',
+      '--script-opt=osc-custom_button_1_mbtn_left_command=script-binding select/select-playlist; script-message-to osc osc-hide',
+    )
+  }
   logger.info('playback', 'start', { sessionId: session.sessionId, queueLength: session.queue.length, resume: selectedEntry.initialResumeTicks > 0 })
   const child = spawn(resolveMpvPath(), args, { windowsHide: false, stdio: ['ignore', 'ignore', 'pipe'] })
   session.process = child

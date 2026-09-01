@@ -36,7 +36,12 @@ class FakeMpvIpc {
     ]],
   ])
   eventHandler?: (message: MpvIpcMessage) => void
-  readonly send = vi.fn(async () => undefined)
+  readonly send = vi.fn(async (command: unknown[]) => {
+    if (command[0] !== 'loadlist' || typeof command[1] !== 'string' || !command[1].startsWith('hex://')) return
+    const playlistText = Buffer.from(command[1].slice('hex://'.length), 'hex').toString('utf8')
+    const count = playlistText.split(/\r?\n/).filter((line) => line.startsWith('#EXTINF:')).length
+    this.properties.set('playlist', Array.from({ length: count }, (_, index) => ({ id: index + 1 })))
+  })
   readonly setProperty = vi.fn(async (name: string, value: unknown) => {
     this.properties.set(name, value)
   })
@@ -308,6 +313,8 @@ describe('Electron main process IPC orchestration', () => {
       subtitlePreference: { index: 2 },
     })
     expect(snapshot).toMatchObject({ phase: 'playing', currentItemId: 'movie-1', positionTicks: 20_000_000 })
+    const movieArgs = mocks.spawnMock.mock.calls.at(-1)?.[1] as string[]
+    expect(movieArgs.some((arg) => arg.startsWith('--script-opt=osc-custom_button_1_'))).toBe(false)
     const ipc = mocks.mpvInstances.at(-1)
     expect(ipc).toBeDefined()
     expect(ipc?.setProperty).toHaveBeenCalledWith('pause', false)
@@ -334,6 +341,67 @@ describe('Electron main process IPC orchestration', () => {
     const stopped = await handler('playback:snapshot')()
     expect(stopped.phase).toBe('stopped')
     expect(mocks.fetchMock.mock.calls.some(([url]) => url.includes('/Sessions/Playing/Stopped'))).toBe(true)
+  })
+
+  it('adds a visible OSC playlist selector for multi-episode playback', async () => {
+    const episodes = [
+      { Id: 'episode-1', Name: '第一集', Type: 'Episode', SeriesId: 'series-1', ParentIndexNumber: 1, IndexNumber: 1, MediaStreams: [] },
+      { Id: 'episode-2', Name: '第二集', Type: 'Episode', SeriesId: 'series-1', ParentIndexNumber: 1, IndexNumber: 2, MediaStreams: [] },
+    ]
+    const playbackInfo = (id: string) => ({
+      PlaySessionId: `session-${id}`,
+      MediaSources: [{ Id: `source-${id}`, SupportsDirectPlay: true }],
+    })
+    mocks.fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes('/Shows/series-1/Episodes')) return jsonResponse({ Items: episodes, TotalRecordCount: episodes.length })
+      const episode = episodes.find((item) => url.includes(`/Items/${item.Id}`))
+      if (episode && url.includes('/PlaybackInfo')) return jsonResponse(playbackInfo(episode.Id))
+      if (episode) return jsonResponse(episode)
+      return new Response(null, { status: 204 })
+    })
+
+    const snapshot = await handler('playback:start')({}, { itemId: 'episode-2' })
+    expect(snapshot).toMatchObject({ phase: 'playing', currentItemId: 'episode-2', currentIndex: 1 })
+    expect(snapshot.queue.map((item) => item.itemId)).toEqual(['episode-1', 'episode-2'])
+    const args = mocks.spawnMock.mock.calls.at(-1)?.[1] as string[]
+    expect(args).toContain('--script-opt=osc-custom_button_1_content=\u2637')
+    expect(args).toContain('--script-opt=osc-custom_button_1_mbtn_left_command=script-binding select/select-playlist; script-message-to osc osc-hide')
+
+    const ipc = mocks.mpvInstances.at(-1)
+    expect(ipc?.send).toHaveBeenCalledWith(['playlist-play-index', 1])
+    ipc?.emit({ event: 'end-file', reason: 'stop', playlist_entry_id: 2 })
+    ipc?.emit({ event: 'start-file', playlist_entry_id: 1 })
+    ipc?.emit({ event: 'file-loaded' })
+    await flush()
+    await flush()
+    const switched = await handler('playback:snapshot')()
+    expect(switched).toMatchObject({ phase: 'playing', currentItemId: 'episode-1', currentIndex: 0 })
+    const stoppedEpisodeIds = mocks.fetchMock.mock.calls
+      .filter(([url]) => url.includes('/Sessions/Playing/Stopped'))
+      .map(([, init]) => JSON.parse(init.body).ItemId)
+    expect(stoppedEpisodeIds).toContain('episode-2')
+    const switchedPlaying = mocks.fetchMock.mock.calls
+      .filter(([url]) => url.includes('/Sessions/Playing') && !url.includes('/Progress') && !url.includes('/Stopped'))
+      .map(([, init]) => JSON.parse(init.body).ItemId)
+    expect(switchedPlaying).toContain('episode-1')
+    await handler('playback:command')({}, { sessionId: snapshot.sessionId, command: 'stop' })
+  })
+
+  it('does not add an OSC playlist selector for a standalone episode', async () => {
+    const episode = { Id: 'single-episode', Name: '单集', Type: 'Episode', MediaStreams: [] }
+    mocks.fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes('/Items/single-episode/PlaybackInfo')) {
+        return jsonResponse({ PlaySessionId: 'single-session', MediaSources: [{ Id: 'single-source', SupportsDirectPlay: true }] })
+      }
+      if (url.includes('/Users/user-1/Items/single-episode')) return jsonResponse(episode)
+      return new Response(null, { status: 204 })
+    })
+
+    const snapshot = await handler('playback:start')({}, { itemId: episode.Id })
+    const args = mocks.spawnMock.mock.calls.at(-1)?.[1] as string[]
+    expect(snapshot.queue).toHaveLength(1)
+    expect(args.some((arg) => arg.startsWith('--script-opt=osc-custom_button_1_'))).toBe(false)
+    await handler('playback:command')({}, { sessionId: snapshot.sessionId, command: 'stop' })
   })
 
   it('keeps MPV alive through redirect playlist expansion and finalizes only the last physical entry', async () => {
