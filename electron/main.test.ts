@@ -316,6 +316,33 @@ describe('Electron main process IPC orchestration', () => {
     expect(mocks.fetchMock.mock.calls.some(([url]) => url.includes('/Sessions/Playing/Stopped'))).toBe(true)
   })
 
+  it('rejects explicit audio and subtitle selections instead of silently falling back', async () => {
+    const movie = { Id: 'movie-explicit-track', Name: '指定轨道测试', Type: 'Movie', MediaStreams: [] }
+    mocks.fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes('/Items/movie-explicit-track/PlaybackInfo')) {
+        return jsonResponse({
+          MediaSources: [{
+            Id: 'source-explicit-track',
+            SupportsDirectPlay: true,
+            MediaStreams: [{ Type: 'Audio', Index: 1, Language: 'ja' }],
+          }],
+        })
+      }
+      if (url.includes('/Users/user-1/Items/movie-explicit-track')) return jsonResponse(movie)
+      return new Response(null, { status: 204 })
+    })
+
+    await expect(handler('playback:start')({}, {
+      itemId: movie.Id,
+      audioPreference: { index: 9 },
+    })).rejects.toThrow('未找到用户指定的音轨 9')
+
+    await expect(handler('playback:start')({}, {
+      itemId: movie.Id,
+      subtitlePreference: { index: 8 },
+    })).rejects.toThrow('未找到用户指定的字幕轨道 8')
+  })
+
   it('returns the last snapshot for stale commands and surfaces MPV validation errors', async () => {
     const current = await handler('playback:snapshot')()
     await expect(handler('playback:command')({}, { sessionId: 'stale', command: 'pause' })).resolves.toEqual(current)
