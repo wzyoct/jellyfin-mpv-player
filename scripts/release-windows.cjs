@@ -74,7 +74,7 @@ function archiveExistingOutput() {
     const source = path.join(releaseRoot, entry.name)
     if (entry.name === 'data' || entry.name === '历史版本' || entry.name === '构建内部文件') continue
     const versionHint = detectVersion(source, entry.name) || '0.7.0'
-    const isRuntime = entry.name === 'Ember Player.exe'
+    const isRuntime = entry.name === 'Jellyfin MPV Player.exe'
       || entry.name === 'resources'
       || entry.name === 'locales'
       || /\.(dll|pak|bin|dat|json)$/.test(entry.name)
@@ -89,7 +89,7 @@ function writeTextFile(filePath, content) {
 }
 
 function formatReleaseNotes(note) {
-  const lines = [`Ember Player v${note.version} 更新记录`, `日期：${note.date}`, '']
+  const lines = [`Jellyfin MPV Player v${note.version} 更新记录`, `日期：${note.date}`, '']
   if (note.summary) lines.push(note.summary, '')
   for (const section of note.sections) {
     lines.push(`【${section.title}】`)
@@ -102,16 +102,16 @@ function formatReleaseNotes(note) {
 function writeGuides() {
   if (!release) throw new Error(`找不到 ${version} 的更新记录`)
   writeTextFile(path.join(releaseRoot, '00-启动说明.txt'), `
-Ember Player Windows 便携版启动说明
+Jellyfin MPV Player Windows 便携版启动说明
 当前版本：v${version}
 发布日期：${releaseDate}
 
 启动方式：
-1. 保持本文件与“Ember Player.exe”位于同一个 release 文件夹。
-2. 双击“Ember Player.exe”即可启动，无需安装、无需解压。
+1. 保持本文件与“Jellyfin MPV Player.exe”位于同一个 release 文件夹。
+2. 双击“Jellyfin MPV Player.exe”即可启动，无需安装、无需解压。
 3. 登录配置、缓存和运行数据保存在同目录的 data 文件夹。
 
-播放媒体前，请在 Ember Player 设置中确认 MPV 路径有效。
+播放媒体前，请在 Jellyfin MPV Player 设置中确认 MPV 路径有效。
 MPV 默认使用 C:\\green\\mpv\\mpv.exe；便携版不会把 MPV 打包进应用。
 不要移动、删除或改名 resources、locales、DLL、PAK 文件。
 `)
@@ -134,7 +134,7 @@ function runtimeFiles(directory) {
 
 function writeChecksums() {
   const files = runtimeFiles(releaseRoot)
-  const lines = [`Ember Player v${version} 运行文件 SHA256 校验值`, `生成日期：${releaseDate}`, '明确排除：data 文件夹（便携配置、令牌和缓存）', '']
+  const lines = [`Jellyfin MPV Player v${version} 运行文件 SHA256 校验值`, `生成日期：${releaseDate}`, '明确排除：data 文件夹（便携配置、令牌和缓存）', '']
   for (const file of files) {
     const hash = crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')
     lines.push(`${hash}  ${path.relative(releaseRoot, file)}`)
@@ -149,7 +149,7 @@ function copyRuntime() {
     const target = path.join(releaseRoot, entry.name)
     fs.cpSync(source, target, { recursive: true, force: true })
   }
-  const executable = path.join(releaseRoot, 'Ember Player.exe')
+  const executable = path.join(releaseRoot, 'Jellyfin MPV Player.exe')
   if (!fs.existsSync(executable)) throw new Error(`便携入口不存在：${executable}`)
 }
 

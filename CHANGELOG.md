@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.0.0 - 2026-09-01
+
+全面转为 Jellyfin MPV Player，修复 MediaWarp STRM、外置字幕和首页轮播稳定性。
+
+### 重构
+
+- 删除运行时的旧媒体服务器兼容分支，统一使用 Jellyfin 10.11.x API 和 MPV 播放契约。
+- PlaybackInfo 改为 POST，并使用 MPV DeviceProfile 协商直连、静态流和转码能力。
+- 新增会话级本地播放网关，隔离 Jellyfin Token，支持 MediaWarp 302、Range 和按集生成短期播放地址。
+
+### 修复
+
+- 修复 HTTP(S) STRM 资源无法通过 MediaWarp 302 直连播放的问题。
+- 按 Jellyfin DeliveryUrl 和 DeliveryMethod 加载 SRT、ASS 等外置字幕，并映射 MPV 内嵌字幕和音轨。
+- 首页推荐轮播改用持久化双图层，加载失败时保留当前海报，消除黑帧闪烁。
+
 ## 0.9.0 - 2026-09-01
 
 以 Jellyfin 为主完成媒体服务器兼容，同时保留现有 Emby 连接与播放能力。

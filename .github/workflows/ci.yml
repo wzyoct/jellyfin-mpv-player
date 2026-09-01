@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ember-player-${{ github.workflow }}-${{ github.ref }}
+  group: jellyfin-mpv-player-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:

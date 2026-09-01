@@ -2,7 +2,7 @@
 
 ## 用户只需要点击什么
 
-每次正式打包后，打开项目根目录下的 `release/` 文件夹，直接双击根目录中的 `Ember Player.exe`。不需要安装、不需要解压，也不会生成单文件自解压程序。
+每次正式打包后，打开项目根目录下的 `release/` 文件夹，直接双击根目录中的 `Jellyfin MPV Player.exe`。不需要安装、不需要解压，也不会生成单文件自解压程序。
 
 便携配置、登录状态、缓存和诊断日志位于同目录的 `data/`。日志文件在 `data/logs/`，应用会自动轮转并保留有限数量的历史文件。移动整个 `release/` 文件夹时请保留 `resources/`、`locales/` 和所有 DLL/PAK 运行文件。
 
@@ -10,7 +10,7 @@
 
 ```text
 release/
-├─ Ember Player.exe
+├─ Jellyfin MPV Player.exe
 ├─ data/
 ├─ resources/
 ├─ locales/
@@ -36,7 +36,7 @@ npm run dist
 发布前还需要检查：
 
 - `package.json`、`package-lock.json` 和更新记录版本一致。
-- `release/Ember Player.exe` 双击后可直接启动且不弹安装器。
+- `release/Jellyfin MPV Player.exe` 双击后可直接启动且不弹安装器。
 - 二次双击只聚焦已有窗口，不会启动第二个实例。
 - 应用中的 MPV 路径可用。
 - `release/data` 未被构建流程覆盖或计算校验值。
@@ -45,7 +45,7 @@ npm run dist
 
 项目远程仓库已经配置为：
 
-`https://github.com/wzyoct/emby-mickey.git`
+`https://github.com/wzyoct/jellyfin-mpv-player.git`
 
 每次面向用户的更新都按下面的顺序执行，确保程序、文档和 GitHub 提交保持一致：
 
@@ -84,7 +84,7 @@ npm run dist
 6. 使用 Conventional Commits 格式创建存档提交，并推送当前分支：
 
    ```powershell
-   git commit -m "chore: 发布 Ember Player <版本号>"
+   git commit -m "chore: 发布 Jellyfin MPV Player <版本号>"
    git push origin HEAD
    ```
 
