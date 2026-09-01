@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   fetchMock: vi.fn(),
   writeFileSyncMock: vi.fn(),
   waitSequences: [] as MpvIpcMessage[][],
+  failPropertyCommands: new Set<string>(),
   mainWindow: null as any,
   logger: {
     initialize: vi.fn(),
@@ -47,6 +48,7 @@ class FakeMpvIpc {
     this.properties.set('playlist', Array.from({ length: count }, (_, index) => ({ id: index + 1 })))
   })
   readonly setProperty = vi.fn(async (name: string, value: unknown) => {
+    if (mocks.failPropertyCommands.has(name)) throw new Error(`set_property ${name} failed`)
     this.properties.set(name, value)
   })
   readonly getProperty = vi.fn(async (name: string) => this.properties.get(name))
@@ -203,6 +205,7 @@ describe('Electron main process IPC orchestration', () => {
     mocks.spawnMock.mockReset()
     mocks.spawnSyncMock.mockReset()
     mocks.waitSequences.length = 0
+    mocks.failPropertyCommands.clear()
     mocks.mpvInstances.length = 0
     mocks.spawnSyncMock.mockReturnValue({ status: 0, stdout: 'mpv 0.41.0', stderr: '' })
     mocks.spawnMock.mockImplementation(() => makeChild())
@@ -346,6 +349,80 @@ describe('Electron main process IPC orchestration', () => {
     const stopped = await handler('playback:snapshot')()
     expect(stopped.phase).toBe('stopped')
     expect(mocks.fetchMock.mock.calls.some(([url]) => url.includes('/Sessions/Playing/Stopped'))).toBe(true)
+  })
+
+  it('returns control failures without changing a healthy playback phase', async () => {
+    const movie = { Id: 'movie-command-error', Name: '控制错误测试', Type: 'Movie', MediaStreams: [] }
+    mocks.fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes('/Items/movie-command-error/PlaybackInfo')) return jsonResponse({ MediaSources: [{ Id: 'command-error-source', SupportsDirectPlay: true }] })
+      if (url.includes('/Users/user-1/Items/movie-command-error')) return jsonResponse(movie)
+      return new Response(null, { status: 204 })
+    })
+
+    const snapshot = await handler('playback:start')({}, { itemId: movie.Id })
+    mocks.failPropertyCommands.add('pause')
+    await expect(handler('playback:command')({}, { sessionId: snapshot.sessionId, command: 'pause' })).rejects.toThrow('set_property pause failed')
+    expect((await handler('playback:snapshot')()).phase).toBe('playing')
+    expect(mocks.mainWindow.webContents.send.mock.calls.some(([channel, payload]) => channel === 'playback:changed' && payload.type === 'error')).toBe(false)
+
+    mocks.failPropertyCommands.delete('pause')
+    await handler('playback:command')({}, { sessionId: snapshot.sessionId, command: 'pause' })
+    const ipc = mocks.mpvInstances.at(-1)
+    ipc?.emit({ event: 'property-change', name: 'pause', data: true })
+    await flush()
+    expect((await handler('playback:snapshot')()).phase).toBe('paused')
+    ipc?.properties.set('playlist', 'invalid-playlist')
+    await expect(handler('playback:command')({}, { sessionId: snapshot.sessionId, command: 'stop-after-current' })).rejects.toThrow('MPV 未返回有效的播放列表')
+    expect((await handler('playback:snapshot')()).phase).toBe('paused')
+    await handler('playback:command')({}, { sessionId: snapshot.sessionId, command: 'stop' })
+  })
+
+  it('terminates the session when an MPV event cannot refresh playlist state', async () => {
+    const movie = { Id: 'movie-event-error', Name: '事件错误测试', Type: 'Movie', MediaStreams: [] }
+    mocks.fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes('/Items/movie-event-error/PlaybackInfo')) return jsonResponse({ MediaSources: [{ Id: 'event-error-source', SupportsDirectPlay: true }] })
+      if (url.includes('/Users/user-1/Items/movie-event-error')) return jsonResponse(movie)
+      return new Response(null, { status: 204 })
+    })
+
+    const snapshot = await handler('playback:start')({}, { itemId: movie.Id })
+    const ipc = mocks.mpvInstances.at(-1)
+    ipc?.properties.set('playlist', undefined)
+    ipc?.emit({ event: 'end-file', reason: 'redirect', playlist_entry_id: 1 })
+    await flush()
+    await flush()
+    const stopped = await handler('playback:snapshot')()
+    expect(stopped).toMatchObject({ phase: 'error', sessionId: snapshot.sessionId })
+    expect((mocks.spawnMock.mock.results.at(-1)?.value as ReturnType<typeof makeChild>).kill).toHaveBeenCalled()
+  })
+
+  it('serializes concurrent starts and tears down the previous MPV process first', async () => {
+    const firstMovie = { Id: 'movie-concurrent-first', Name: '并发第一部', Type: 'Movie', MediaStreams: [] }
+    const secondMovie = { Id: 'movie-concurrent-second', Name: '并发第二部', Type: 'Movie', MediaStreams: [] }
+    let resolveFirstPlaybackInfo!: (response: Response) => void
+    const firstPlaybackInfo = new Promise<Response>((resolve) => { resolveFirstPlaybackInfo = resolve })
+    mocks.fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes('/Items/movie-concurrent-first/PlaybackInfo')) return firstPlaybackInfo
+      if (url.includes('/Users/user-1/Items/movie-concurrent-first')) return jsonResponse(firstMovie)
+      if (url.includes('/Items/movie-concurrent-second/PlaybackInfo')) return jsonResponse({ MediaSources: [{ Id: 'concurrent-second-source', SupportsDirectPlay: true }] })
+      if (url.includes('/Users/user-1/Items/movie-concurrent-second')) return jsonResponse(secondMovie)
+      return new Response(null, { status: 204 })
+    })
+
+    const first = handler('playback:start')({}, { itemId: firstMovie.Id })
+    await flush()
+    const second = handler('playback:start')({}, { itemId: secondMovie.Id })
+    await flush()
+    expect(mocks.spawnMock).not.toHaveBeenCalled()
+
+    resolveFirstPlaybackInfo(jsonResponse({ MediaSources: [{ Id: 'concurrent-first-source', SupportsDirectPlay: true }] }))
+    const [firstSnapshot, secondSnapshot] = await Promise.all([first, second])
+    expect(firstSnapshot.currentItemId).toBe(firstMovie.Id)
+    expect(secondSnapshot).toMatchObject({ phase: 'playing', currentItemId: secondMovie.Id })
+    expect(mocks.spawnMock).toHaveBeenCalledTimes(2)
+    const firstChild = mocks.spawnMock.mock.results[0]?.value as ReturnType<typeof makeChild>
+    expect(firstChild.kill).toHaveBeenCalled()
+    await handler('playback:command')({}, { sessionId: secondSnapshot.sessionId, command: 'stop' })
   })
 
   it('adds a visible OSC playlist selector for multi-episode playback', async () => {

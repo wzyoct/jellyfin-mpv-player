@@ -768,7 +768,11 @@ async function togglePlaybackPause(): Promise<void> {
   const sessionId = playbackSnapshot.value.sessionId
   if (!sessionId) return
   const command = playbackSnapshot.value.phase === 'paused' ? 'resume' : 'pause'
-  handlePlaybackSnapshot(await window.jellyfin.playbackCommand({ sessionId, command }))
+  try {
+    handlePlaybackSnapshot(await window.jellyfin.playbackCommand({ sessionId, command }))
+  } catch (error) {
+    showNotice(error instanceof Error ? error.message : '播放控制失败', 'error')
+  }
 }
 
 async function sendPlaybackCommand(command: 'previous' | 'next' | 'stop-after-current'): Promise<void> {

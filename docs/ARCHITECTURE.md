@@ -2,7 +2,9 @@
 
 ## 数据边界
 
-渲染进程只通过 `window.jellyfin` 调用媒体领域接口。Electron 主进程负责鉴权、响应校验、播放协商、MPV IPC 和进度上报；渲染进程不接触令牌，也不拼接媒体地址。连接入口必须是 MediaWarp 根地址，登录先校验 `/MediaWarp/version`（>=0.2.4），再校验 Jellyfin 10.11.x；所有 API、图片、PlaybackInfo 和媒体请求使用同一 Base URL。
+渲染进程只通过 `window.jellyfin` 调用媒体领域接口。Electron 主进程负责鉴权、响应校验和 IPC 接线；`PlaybackManager` 单独拥有活动播放会话、MPV 子进程、临时网关、递增快照版本和清理流程。渲染进程不接触令牌，也不拼接媒体地址。连接入口必须是 MediaWarp 根地址，登录先校验 `/MediaWarp/version`（>=0.2.4），再校验 Jellyfin 10.11.x；所有 API、图片、PlaybackInfo 和媒体请求使用同一 Base URL。
+
+播放器的启动、停止和控制命令经过管理器生命周期队列串行执行；MPV 生命周期事件与会话命令继续经过会话事件链串行处理。播放阶段只由播放生命周期驱动，`syncError` 只表示 Jellyfin 状态上报失败，控制命令错误会返回调用方而不会污染活动会话状态。
 
 ## 播放链路
 
