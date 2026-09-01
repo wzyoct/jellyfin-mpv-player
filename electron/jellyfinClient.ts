@@ -12,6 +12,7 @@ import type {
   RecommendationDto,
   JellyfinIdentity,
   PlaybackInfoRequest,
+  PlaybackRoute,
 } from '../src/types'
 
 export type { MediaSourceInfo, PlaybackInfo } from '../src/types'
@@ -318,8 +319,8 @@ export class JellyfinClient {
         MaxStreamingBitrate: 100_000_000,
         MaxStaticBitrate: 100_000_000,
         DirectPlayProfiles: [
-          { Type: 'Video', VideoCodec: '*', AudioCodec: '*', Container: '*' },
-          { Type: 'Audio', AudioCodec: '*', Container: '*' },
+          { Type: 'Video' },
+          { Type: 'Audio' },
         ],
         TranscodingProfiles: [
           { Type: 'Video', Container: 'ts', AudioCodec: 'aac,mp3,ac3,eac3,opus,flac', VideoCodec: 'h264,hevc,vp9,av1', Protocol: 'hls', Context: 'Streaming', EnableMpegtsM2TsMode: true },
@@ -415,7 +416,12 @@ export class JellyfinClient {
     subtitleStreamIndex?: number
     playSessionId?: string
   }): string {
-    const rawUrl = source.DirectStreamUrl || source.TranscodingUrl || `/Videos/${encodeURIComponent(itemId)}/stream`
+    const rawUrl = source.DirectStreamUrl
+      || source.TranscodingUrl
+      || ((source.SupportsDirectPlay || source.SupportsDirectStream) ? `/Videos/${encodeURIComponent(itemId)}/stream` : undefined)
+    if (!rawUrl) {
+      throw new Error(`媒体源 ${source.Id} 没有可用的播放地址`)
+    }
     const url = new URL(this.resolveUrl(rawUrl))
     // The URL stays inside the loopback gateway. Keeping server-issued query
     // parameters is required for MediaWarp's short-lived redirect route.
@@ -427,6 +433,29 @@ export class JellyfinClient {
     if (options.subtitleStreamIndex !== undefined) url.searchParams.set('SubtitleStreamIndex', String(options.subtitleStreamIndex))
     if (options.playSessionId) url.searchParams.set('PlaySessionId', options.playSessionId)
     return url.toString()
+  }
+
+  buildPlaybackRoute(itemId: string, source: MediaSourceInfo, options: {
+    audioStreamIndex?: number
+    subtitleStreamIndex?: number
+    playSessionId?: string
+  }): PlaybackRoute {
+    const kind: PlaybackRoute['kind'] = source.DirectStreamUrl
+      ? source.SupportsDirectPlay ? 'direct-play' : 'direct-stream'
+      : source.TranscodingUrl
+        ? 'transcode'
+        : source.SupportsDirectPlay
+          ? 'direct-play'
+          : source.SupportsDirectStream
+            ? 'direct-stream'
+            : (() => { throw new Error(`媒体源 ${source.Id} 没有可用的播放路由`) })()
+    return {
+      kind,
+      upstreamUrl: this.buildStreamUrl(itemId, source, options),
+      mediaSourceId: source.Id,
+      playSessionId: options.playSessionId,
+      requiredHttpHeaders: { ...(source.RequiredHttpHeaders || {}) },
+    }
   }
 
   async reportPlaying(payload: PlaybackReportPayload): Promise<void> {

@@ -313,6 +313,15 @@ describe('Electron main process IPC orchestration', () => {
     expect(ipc?.setProperty).toHaveBeenCalledWith('pause', false)
     expect(ipc?.send.mock.calls.some(([command]) => command[0] === 'playlist-play-index')).toBe(true)
     expect(mocks.fetchMock.mock.calls.some(([url]) => url.includes('/Sessions/Playing'))).toBe(true)
+    const playingCall = mocks.fetchMock.mock.calls.find(([url]) => url.includes('/Sessions/Playing') && !url.includes('/Progress'))
+    expect(playingCall).toBeDefined()
+    expect(JSON.parse(playingCall?.[1].body)).toMatchObject({
+      ItemId: 'movie-1',
+      PlayMethod: 'DirectPlay',
+      AudioStreamIndex: 1,
+      SubtitleStreamIndex: 2,
+      PositionTicks: 20_000_000,
+    })
 
     ipc?.emit({ event: 'property-change', name: 'time-pos', data: 12 })
     ipc?.emit({ event: 'property-change', name: 'pause', data: true })
@@ -368,7 +377,7 @@ describe('Electron main process IPC orchestration', () => {
     const movie = { Id: 'movie-error', Name: '错误测试', Type: 'Movie', MediaStreams: [] }
     mocks.waitSequences.push([
       { event: 'start-file', playlist_entry_id: 1 },
-      { event: 'end-file', reason: 'error', file_error: 'network unreachable', playlist_entry_id: 1 },
+      { event: 'end-file', reason: 'error', file_error: 'loading failed', playlist_entry_id: 1 },
     ])
     mocks.fetchMock.mockImplementation(async (url: string) => {
       if (url.includes('/Items/movie-error/PlaybackInfo')) return jsonResponse({ MediaSources: [{ Id: 'error-source', SupportsDirectPlay: true }] })
@@ -376,7 +385,7 @@ describe('Electron main process IPC orchestration', () => {
       return new Response(null, { status: 204 })
     })
 
-    await expect(handler('playback:start')({}, { itemId: movie.Id })).rejects.toThrow('network unreachable')
+    await expect(handler('playback:start')({}, { itemId: movie.Id })).rejects.toThrow('《错误测试》加载失败：媒体资源无法加载')
     expect((await handler('playback:snapshot')()).phase).toBe('error')
     expect(mocks.mainWindow.webContents.send.mock.calls.filter(([channel, payload]) => channel === 'playback:changed' && payload.type === 'error')).toHaveLength(0)
   })

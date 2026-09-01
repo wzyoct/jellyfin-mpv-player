@@ -21,13 +21,19 @@ async function run() {
   assert.match(lastInit.headers.get('Authorization'), /Token="token"/)
 
   responseBody = { MediaSources: [{ Id: 'source-1', SupportsDirectPlay: true }] }
-  await client.getPlaybackInfo('movie-1', { mediaSourceId: 'source-1', audioStreamIndex: 1, subtitleStreamIndex: 2 })
+  await client.getPlaybackInfo('movie-1', { mediaSourceId: 'source-1', audioStreamIndex: 1, subtitleStreamIndex: 2, startTimeTicks: 40 })
   assert.match(lastUrl, /\/Items\/movie-1\/PlaybackInfo$/)
   assert.equal(lastInit.method, 'POST')
   const playbackBody = JSON.parse(lastInit.body)
   assert.equal(playbackBody.UserId, 'user')
   assert.equal(playbackBody.MediaSourceId, 'source-1')
-  assert.equal(playbackBody.DeviceProfile.DirectPlayProfiles[0].Container, '*')
+  assert.equal(playbackBody.AudioStreamIndex, 1)
+  assert.equal(playbackBody.SubtitleStreamIndex, 2)
+  assert.equal(playbackBody.StartTimeTicks, 40)
+  assert.deepEqual(playbackBody.DeviceProfile.DirectPlayProfiles, [{ Type: 'Video' }, { Type: 'Audio' }])
+  assert.equal('Container' in playbackBody.DeviceProfile.DirectPlayProfiles[0], false)
+  assert.equal('VideoCodec' in playbackBody.DeviceProfile.DirectPlayProfiles[0], false)
+  assert.equal('AudioCodec' in playbackBody.DeviceProfile.DirectPlayProfiles[0], false)
 
   responseBody = { Items: [{ Id: 'episode-1', Name: '第一集', Type: 'Episode' }], TotalRecordCount: 1 }
   assert.deepEqual((await client.getSeriesEpisodes('series-1')).map((item) => item.Id), ['episode-1'])

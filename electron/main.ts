@@ -12,6 +12,7 @@ import { buildEpisodeQueue } from '../src/playbackQueue'
 import { buildHexPlaylistUrl, mapWithConcurrency } from './playbackPlaylist'
 import { chooseDefaultSubtitle } from '../src/subtitlePreference'
 import { isResumePositionReached, resolveResumeTicks } from './playbackLogic'
+import { formatPlaybackLoadError } from './playbackError'
 import type {
   AudioPreference,
   MediaItem,
@@ -55,6 +56,8 @@ interface PlaybackEntry extends PlaybackQueueItem {
   subtitleStreamIndex?: number
   finalized: boolean
   initialResumeTicks: number
+  routeKind: PlaybackRoute['kind']
+  gatewayUrl?: string
   playlistEntryIds: number[]
   playlistIndexes: number[]
   activePlaylistEntryId?: number
@@ -339,6 +342,11 @@ async function prepareEntry(session: PlaybackSession, item: MediaItem, startTime
     throw new Error(`《${item.Name}》未找到用户指定的字幕轨道 ${session.subtitlePreference.index}`)
   }
   const subtitle = subtitleStreamIndex === undefined ? undefined : streams.find((stream) => stream.Type === 'Subtitle' && stream.Index === subtitleStreamIndex)
+  const route = client.buildPlaybackRoute(item.Id, source, {
+    audioStreamIndex,
+    subtitleStreamIndex,
+    playSessionId: playbackInfo.PlaySessionId,
+  })
   return {
     ...queueItem(item),
     item,
@@ -352,6 +360,7 @@ async function prepareEntry(session: PlaybackSession, item: MediaItem, startTime
     subtitleStreamIndex,
     finalized: false,
     initialResumeTicks: Math.max(0, startTimeTicks),
+    routeKind: route.kind,
     playlistEntryIds: [],
     playlistIndexes: [],
     loaded: false,
@@ -402,7 +411,7 @@ function reportPayload(session: PlaybackSession, entry: PlaybackEntry, eventName
     ItemId: entry.itemId,
     MediaSourceId: entry.source.Id,
     PlaySessionId: entry.playbackInfo.PlaySessionId,
-    PlayMethod: entry.source.TranscodingUrl && !entry.source.DirectStreamUrl ? 'Transcode' : entry.source.SupportsDirectPlay ? 'DirectPlay' : 'DirectStream',
+    PlayMethod: entry.routeKind === 'transcode' ? 'Transcode' : entry.routeKind === 'direct-play' ? 'DirectPlay' : 'DirectStream',
     PositionTicks: Math.max(0, Math.round(entry.positionSeconds * 10_000_000)),
     IsPaused: entry.isPaused,
     CanSeek: true,
@@ -525,25 +534,30 @@ async function finishSession(session: PlaybackSession, reason: string, terminate
   await session.finalizePromise
 }
 
-function buildStreamUrl(session: PlaybackSession, entry: PlaybackEntry): string {
-  const upstreamUrl = getClient().buildStreamUrl(entry.itemId, entry.source, {
+function registerPlaybackRoute(session: PlaybackSession, entry: PlaybackEntry): string {
+  const route = getClient().buildPlaybackRoute(entry.itemId, entry.source, {
     audioStreamIndex: entry.audioStreamIndex,
     subtitleStreamIndex: entry.subtitleStreamIndex,
     playSessionId: entry.playbackInfo.PlaySessionId,
   })
-  const route: PlaybackRoute = {
-    kind: entry.source.TranscodingUrl && !entry.source.DirectStreamUrl
-      ? 'transcode'
-      : entry.source.SupportsDirectPlay ? 'direct-play' : 'direct-stream',
-    upstreamUrl,
-    mediaSourceId: entry.source.Id,
-    playSessionId: entry.playbackInfo.PlaySessionId,
-    requiredHttpHeaders: { ...(entry.source.RequiredHttpHeaders || {}) },
-  }
+  if (route.kind !== entry.routeKind) throw new Error(`《${entry.name}》播放路由状态不一致`)
   let host = 'unknown'
   try { host = new URL(route.upstreamUrl).hostname } catch { /* validated by the gateway */ }
-  logger.info('playback', 'route-registered', { sessionId: session.sessionId, itemId: entry.itemId, kind: route.kind, host, mediaSourceId: route.mediaSourceId })
-  return session.gateway.register({ upstreamUrl: route.upstreamUrl, requiredHeaders: route.requiredHttpHeaders })
+  const gatewayUrl = session.gateway.register({ upstreamUrl: route.upstreamUrl, requiredHeaders: route.requiredHttpHeaders })
+  entry.gatewayUrl = gatewayUrl
+  logger.info('playback', 'route-registered', {
+    sessionId: session.sessionId,
+    itemId: entry.itemId,
+    kind: route.kind,
+    host,
+    mediaSourceId: route.mediaSourceId,
+    hasDirectStreamUrl: Boolean(entry.source.DirectStreamUrl),
+    hasTranscodingUrl: Boolean(entry.source.TranscodingUrl),
+    supportsDirectPlay: Boolean(entry.source.SupportsDirectPlay),
+    supportsDirectStream: Boolean(entry.source.SupportsDirectStream),
+    requiredHeaderCount: Object.keys(route.requiredHttpHeaders).length,
+  })
+  return gatewayUrl
 }
 
 async function seekEntry(session: PlaybackSession, entry: PlaybackEntry, startTimeTicks: number): Promise<void> {
@@ -747,7 +761,18 @@ async function handleEndFile(session: PlaybackSession, message: MpvIpcMessage): 
     return
   }
   if (reason === 'error' || reason === 'unknown') {
-    session.syncError = `《${entry.name}》加载失败：${message.file_error || `MPV 返回结束原因 ${reason}`}`
+    const diagnostic = entry.gatewayUrl ? session.gateway.getDiagnostic(entry.gatewayUrl) : undefined
+    logger.warn('playback', 'mpv-end-file', {
+      sessionId: session.sessionId,
+      itemId: entry.itemId,
+      reason,
+      fileError: message.file_error,
+      playlistEntryId: message.playlist_entry_id,
+      gatewayPhase: diagnostic?.phase,
+      gatewayStatus: diagnostic?.status,
+      gatewayRedirects: diagnostic?.redirects,
+    })
+    session.syncError = formatPlaybackLoadError(entry.name, message.file_error, diagnostic, reason)
     await finishSession(session, 'error', true)
     if (!session.startupPending) emitPlayback('error', session, session.syncError)
     return
@@ -950,7 +975,7 @@ async function startPlayback(request: StartPlaybackRequest): Promise<PlaybackSna
   try {
     await session.gateway.start()
     await attachMpvIpc(session)
-    const playlistUrl = buildHexPlaylistUrl(playable.map((result) => ({ item: queueItem(result.item), url: buildStreamUrl(session, result.entry) })))
+    const playlistUrl = buildHexPlaylistUrl(playable.map((result) => ({ item: queueItem(result.item), url: registerPlaybackRoute(session, result.entry) })))
     await session.ipc.setProperty('pause', true)
     await session.ipc.setProperty('http-header-fields', [])
     await session.ipc.send(['keybind', 'MBTN_RIGHT', 'script-binding', 'select/select-playlist'])
@@ -969,8 +994,17 @@ async function startPlayback(request: StartPlaybackRequest): Promise<PlaybackSna
     await session.ipc.send(['playlist-play-index', selectedPlaylistIndex])
     const loadEvent = await loaded
     if (loadEvent.event !== 'file-loaded') {
-      const reason = loadEvent.reason && loadEvent.reason !== 'unknown' ? `（${loadEvent.reason}）` : ''
-      throw new Error(loadEvent.file_error || `《${selectedPlaylistEntry.name}》加载失败${reason}`)
+      const diagnostic = selectedPlaylistEntry.gatewayUrl ? session.gateway.getDiagnostic(selectedPlaylistEntry.gatewayUrl) : undefined
+      logger.warn('playback', 'startup-load-failed', {
+        sessionId: session.sessionId,
+        itemId: selectedPlaylistEntry.itemId,
+        reason: loadEvent.reason,
+        fileError: loadEvent.file_error,
+        gatewayPhase: diagnostic?.phase,
+        gatewayStatus: diagnostic?.status,
+        gatewayRedirects: diagnostic?.redirects,
+      })
+      throw new Error(formatPlaybackLoadError(selectedPlaylistEntry.name, loadEvent.file_error, diagnostic, loadEvent.reason))
     }
     session.currentEntry = selectedPlaylistEntry
     await activateLoadedEntry(session, selectedPlaylistEntry)
@@ -1016,7 +1050,7 @@ async function playbackCommand(request: PlaybackCommand): Promise<PlaybackSnapsh
       } else if (!session.stopAfterCurrent && session.playlistTrimmed) {
         const tail = Array.from(session.entries.entries())
           .filter(([index, entry]) => index > session.currentIndex && entry.playlistEntryIds.length === 0)
-          .map(([, entry]) => ({ item: entry, url: buildStreamUrl(session, entry) }))
+          .map(([, entry]) => ({ item: entry, url: registerPlaybackRoute(session, entry) }))
         if (tail.length) await session.ipc.send(['loadlist', buildHexPlaylistUrl(tail), 'append'])
         session.playlistTrimmed = false
         await refreshPlaylistMap(session)

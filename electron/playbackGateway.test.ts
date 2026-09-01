@@ -1,7 +1,10 @@
 import { createServer, type Server } from 'node:http'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { JellyfinClient } from './jellyfinClient'
 import { PlaybackGateway } from './playbackGateway'
+
+const loggerMocks = vi.hoisted(() => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn() }))
+vi.mock('./logger', () => ({ logger: loggerMocks }))
 
 const identity = { name: 'Jellyfin Server', version: '10.11.11' }
 const servers: Server[] = []
@@ -60,6 +63,61 @@ describe('PlaybackGateway', () => {
     expect(await response.text()).toBe('hel')
     expect(source.requests[0].headers.referer).toBe('https://alist.example')
     expect(source.requests[0].headers.range).toBe('bytes=0-2')
+    const diagnostic = gateway.getDiagnostic(url)
+    expect(diagnostic).toMatchObject({ status: 206, contentType: 'text/plain', redirects: 0, rangeRequested: true, requiredHeaders: true, phase: 'response', source: 'upstream' })
+    await gateway.dispose()
+  })
+
+  it('follows multiple relative redirects with required headers and records the final response', async () => {
+    const final = await listen((request, response) => {
+      expect(request.headers.referer).toBe('https://alist.example')
+      response.writeHead(200, { 'content-type': 'video/mp4' })
+      response.end('video')
+    })
+    const middle = await listen((request, response) => {
+      if (request.url === '/step-3') {
+        response.writeHead(302, { Location: `${final.url}/movie.mp4` })
+      } else {
+        response.writeHead(302, { Location: 'step-3' })
+      }
+      response.end()
+    })
+    const source = await listen((_request, response) => {
+      response.writeHead(302, { Location: `${middle.url}/step-2` })
+      response.end()
+    })
+    const client = new JellyfinClient(source.url, 'secret-token', 'user-1', identity)
+    const gateway = new PlaybackGateway(client)
+    await gateway.start()
+    const url = gateway.register({ upstreamUrl: `${source.url}/step-1`, requiredHeaders: { Referer: 'https://alist.example' } })
+    const response = await fetch(url, { headers: { Range: 'bytes=0-' } })
+    expect(response.status).toBe(200)
+    expect(await response.text()).toBe('video')
+    expect(source.requests[0].headers.referer).toBe('https://alist.example')
+    expect(middle.requests[0].headers.referer).toBe('https://alist.example')
+    expect(final.requests[0].headers.authorization).toBeUndefined()
+    expect(gateway.getDiagnostic(url)).toMatchObject({ status: 200, contentType: 'video/mp4', redirects: 3, rangeRequested: true, requiredHeaders: true, phase: 'response', source: 'upstream' })
+    await gateway.dispose()
+  })
+
+  it('returns upstream non-2xx status and keeps diagnostics free of secrets and URLs', async () => {
+    const source = await listen((_request, response) => {
+      response.writeHead(403, { 'content-type': 'application/json' })
+      response.end('forbidden')
+    })
+    const client = new JellyfinClient(source.url, 'secret-token', 'user-1', identity)
+    const gateway = new PlaybackGateway(client)
+    await gateway.start()
+    const url = gateway.register({ upstreamUrl: `${source.url}/private?token=route-secret`, requiredHeaders: { Authorization: 'Bearer required-secret' } })
+    const response = await fetch(url)
+    expect(response.status).toBe(403)
+    expect(await response.text()).toBe('forbidden')
+    expect(gateway.getDiagnostic(url)).toMatchObject({ status: 403, phase: 'response', source: 'upstream' })
+    const logText = JSON.stringify(loggerMocks.warn.mock.calls.concat(loggerMocks.info.mock.calls))
+    expect(logText).not.toContain('secret-token')
+    expect(logText).not.toContain('route-secret')
+    expect(logText).not.toContain('required-secret')
+    expect(logText).not.toContain('/private')
     await gateway.dispose()
   })
 

@@ -3,6 +3,7 @@ import { Readable } from 'node:stream'
 import { randomUUID } from 'node:crypto'
 import type { JellyfinClient } from './jellyfinClient'
 import { logger } from './logger'
+import type { PlaybackLoadDiagnostic } from './playbackError'
 
 const HOP_BY_HOP_HEADERS = new Set([
   'connection',
@@ -18,6 +19,7 @@ const HOP_BY_HOP_HEADERS = new Set([
 interface GatewayResource {
   upstreamUrl: string
   requiredHeaders: Record<string, string>
+  diagnostic?: PlaybackLoadDiagnostic
 }
 
 export interface RegisterPlaybackResourceOptions {
@@ -112,6 +114,12 @@ export class PlaybackGateway {
     })
   }
 
+  getDiagnostic(playbackUrl: string): PlaybackLoadDiagnostic | undefined {
+    const match = playbackUrl.match(/\/play\/([a-f0-9]+)$/i)
+    const diagnostic = match ? this.resources.get(match[1])?.diagnostic : undefined
+    return diagnostic ? { ...diagnostic } : undefined
+  }
+
   private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
     if (request.method !== 'GET' && request.method !== 'HEAD') {
       response.writeHead(405, { Allow: 'GET, HEAD' })
@@ -128,39 +136,99 @@ export class PlaybackGateway {
 
     const controller = new AbortController()
     request.once('aborted', () => controller.abort())
+    const diagnostic: PlaybackLoadDiagnostic = {
+      redirects: 0,
+      rangeRequested: typeof request.headers.range === 'string',
+      requiredHeaders: Object.keys(resource.requiredHeaders).length > 0,
+      phase: 'upstream',
+      source: 'upstream',
+    }
+    resource.diagnostic = diagnostic
     try {
-      let upstream = await this.fetch(resource.upstreamUrl, request.method, requestHeaders(request), resource.requiredHeaders, controller.signal, this.isServerOrigin(resource.upstreamUrl))
+      let currentUrl = resource.upstreamUrl
+      let upstream = await this.fetch(currentUrl, request.method, requestHeaders(request), resource.requiredHeaders, controller.signal, this.isServerOrigin(currentUrl))
+      this.recordResponse(diagnostic, upstream, currentUrl)
       let redirects = 0
       while (isRedirect(upstream.status) && resource.requiredHeaders && Object.keys(resource.requiredHeaders).length && redirects < 3) {
         const location = upstream.headers.get('location')
         if (!location) break
-        const resolved = new URL(location, resource.upstreamUrl).toString()
+        const resolved = new URL(location, currentUrl).toString()
         if (!isHttpUrl(resolved)) throw new Error('上游重定向地址不是 HTTP 或 HTTPS')
-        upstream = await this.fetch(resolved, request.method, requestHeaders(request), resource.requiredHeaders, controller.signal, false)
+        currentUrl = resolved
         redirects += 1
+        diagnostic.redirects = redirects
+        diagnostic.phase = 'redirect'
+        upstream = await this.fetch(currentUrl, request.method, requestHeaders(request), resource.requiredHeaders, controller.signal, this.isServerOrigin(currentUrl))
+        this.recordResponse(diagnostic, upstream, currentUrl)
       }
 
       if (isRedirect(upstream.status)) {
         const location = upstream.headers.get('location')
-        if (!location || !isHttpUrl(new URL(location, resource.upstreamUrl).toString())) throw new Error('上游返回了无效的重定向地址')
-        response.writeHead(upstream.status, { Location: new URL(location, resource.upstreamUrl).toString(), 'Cache-Control': 'no-store' })
+        const resolved = location ? new URL(location, currentUrl).toString() : ''
+        if (!resolved || !isHttpUrl(resolved)) throw new Error('上游返回了无效的重定向地址')
+        diagnostic.phase = 'redirect'
+        diagnostic.source = 'redirect'
+        response.writeHead(upstream.status, { Location: resolved, 'Cache-Control': 'no-store' })
         response.end()
         return
       }
 
+      diagnostic.phase = 'response'
       const headers = copyResponseHeaders(upstream)
+      diagnostic.contentType = upstream.headers.get('content-type') || undefined
       response.writeHead(upstream.status, headers)
       if (request.method === 'HEAD' || !upstream.body) {
         response.end()
         return
       }
-      Readable.fromWeb(upstream.body as Parameters<typeof Readable.fromWeb>[0]).pipe(response)
+      const stream = Readable.fromWeb(upstream.body as Parameters<typeof Readable.fromWeb>[0])
+      stream.once('error', (error) => {
+        diagnostic.phase = 'stream'
+        diagnostic.source = 'gateway'
+        diagnostic.status = 502
+        logger.warn('playback-gateway', 'stream-failed', {
+          status: 502,
+          contentType: diagnostic.contentType,
+          redirects: diagnostic.redirects,
+          rangeRequested: diagnostic.rangeRequested,
+          requiredHeaders: diagnostic.requiredHeaders,
+          phase: diagnostic.phase,
+          message: error instanceof Error ? error.message : String(error),
+        })
+        response.destroy()
+      })
+      stream.pipe(response)
     } catch (error) {
       if (controller.signal.aborted) return
-      logger.warn('playback-gateway', 'request-failed', { method: request.method, status: 502, message: error instanceof Error ? error.message : String(error) })
+      diagnostic.phase = 'gateway'
+      diagnostic.source = 'gateway'
+      diagnostic.status = 502
+      logger.warn('playback-gateway', 'request-failed', {
+        method: request.method,
+        status: 502,
+        contentType: diagnostic.contentType,
+        redirects: diagnostic.redirects,
+        rangeRequested: diagnostic.rangeRequested,
+        requiredHeaders: diagnostic.requiredHeaders,
+        phase: diagnostic.phase,
+        message: error instanceof Error ? error.message : String(error),
+      })
       if (!response.headersSent) response.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8' })
       response.end('播放网关请求失败')
     }
+  }
+
+  private recordResponse(diagnostic: PlaybackLoadDiagnostic, response: Response, url: string): void {
+    diagnostic.status = response.status
+    diagnostic.contentType = response.headers.get('content-type') || undefined
+    logger.info('playback-gateway', 'upstream-response', {
+      status: response.status,
+      contentType: diagnostic.contentType,
+      redirects: diagnostic.redirects,
+      rangeRequested: diagnostic.rangeRequested,
+      requiredHeaders: diagnostic.requiredHeaders,
+      serverOrigin: this.isServerOrigin(url),
+    })
   }
 
   private fetch(url: string, method: string, headers: Record<string, string>, requiredHeaders: Record<string, string>, signal: AbortSignal, includeAuthorization = true): Promise<Response> {

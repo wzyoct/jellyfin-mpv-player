@@ -53,7 +53,11 @@ describe('Jellyfin client contract', () => {
     expect(body.MediaSourceId).toBe('source-1')
     expect(body.AudioStreamIndex).toBe(2)
     expect(body.SubtitleStreamIndex).toBe(3)
-    expect(body.DeviceProfile.DirectPlayProfiles[0].Container).toBe('*')
+    expect(body.StartTimeTicks).toBe(40)
+    expect(body.DeviceProfile.DirectPlayProfiles).toEqual([{ Type: 'Video' }, { Type: 'Audio' }])
+    expect(body.DeviceProfile.DirectPlayProfiles[0]).not.toHaveProperty('Container')
+    expect(body.DeviceProfile.DirectPlayProfiles[0]).not.toHaveProperty('VideoCodec')
+    expect(body.DeviceProfile.DirectPlayProfiles[0]).not.toHaveProperty('AudioCodec')
     expect(body.DeviceProfile.SubtitleProfiles).toEqual(expect.arrayContaining([{ Format: 'ass', Method: 'External' }]))
   })
 
@@ -70,6 +74,39 @@ describe('Jellyfin client contract', () => {
     const client = new JellyfinClient('https://media.example.test', 'token', 'user-1', identity)
     const stream = client.buildStreamUrl('item-1', { Id: 'source-1', TranscodingUrl: '/Videos/item-1/master.m3u8' }, {})
     expect(new URL(stream).pathname).toBe('/Videos/item-1/master.m3u8')
+  })
+
+  it('resolves direct play, direct stream, and transcode routes without fallback', () => {
+    const client = new JellyfinClient('https://media.example.test', 'token', 'user-1', identity)
+    expect(client.buildPlaybackRoute('movie-1', {
+      Id: 'direct-play',
+      SupportsDirectPlay: true,
+      DirectStreamUrl: '/Videos/movie-1/stream?Static=true',
+    }, {}).kind).toBe('direct-play')
+    expect(client.buildPlaybackRoute('movie-1', {
+      Id: 'direct-stream',
+      SupportsDirectStream: true,
+      DirectStreamUrl: '/Videos/movie-1/stream?Static=true',
+    }, {}).kind).toBe('direct-stream')
+    expect(client.buildPlaybackRoute('movie-1', {
+      Id: 'transcode',
+      TranscodingUrl: '/Videos/movie-1/master.m3u8',
+    }, {}).kind).toBe('transcode')
+  })
+
+  it('rejects a media source with no server route or declared capability', () => {
+    const client = new JellyfinClient('https://media.example.test', 'token', 'user-1', identity)
+    expect(() => client.buildPlaybackRoute('movie-1', { Id: 'missing-route' }, {})).toThrow('没有可用的播放路由')
+  })
+
+  it('uses a static route only when Jellyfin declares direct capability', () => {
+    const client = new JellyfinClient('https://media.example.test', 'token', 'user-1', identity)
+    const route = client.buildPlaybackRoute('movie-1', { Id: 'static-route', SupportsDirectPlay: true }, { playSessionId: 'session-1' })
+    const url = new URL(route.upstreamUrl)
+    expect(url.pathname).toBe('/Videos/movie-1/stream')
+    expect(url.searchParams.get('MediaSourceId')).toBe('static-route')
+    expect(url.searchParams.get('Static')).toBe('true')
+    expect(url.searchParams.get('PlaySessionId')).toBe('session-1')
   })
 
   it('validates query shapes and reports HTTP failures', async () => {
