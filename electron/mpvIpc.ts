@@ -11,6 +11,8 @@ export interface MpvIpcMessage {
   reason?: string
   file_error?: string
   playlist_entry_id?: number
+  playlist_insert_id?: number
+  playlist_insert_num_entries?: number
 }
 
 export interface ParsedJsonLines {

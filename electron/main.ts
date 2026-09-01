@@ -55,8 +55,10 @@ interface PlaybackEntry extends PlaybackQueueItem {
   subtitleStreamIndex?: number
   finalized: boolean
   initialResumeTicks: number
-  playlistEntryId?: number
-  playlistIndex?: number
+  playlistEntryIds: number[]
+  playlistIndexes: number[]
+  activePlaylistEntryId?: number
+  activePlaylistIndex?: number
   loaded: boolean
   subtitleRoute?: SubtitleRoute
 }
@@ -78,7 +80,6 @@ interface PlaybackSession {
   stopAfterCurrent: boolean
   stopped: boolean
   queueWarnings: PlaybackQueueWarning[]
-  playlistEntryIds: Map<number, number>
   queueIndexByPlaylistId: Map<number, number>
   eventChain: Promise<void>
   pendingTransition: boolean
@@ -86,6 +87,7 @@ interface PlaybackSession {
   idleFinishTimer?: NodeJS.Timeout
   playlistTrimmed: boolean
   playlistReady: boolean
+  startupPending: boolean
   syncError?: string
   endReason?: string
   audioPreference?: AudioPreference
@@ -350,6 +352,8 @@ async function prepareEntry(session: PlaybackSession, item: MediaItem, startTime
     subtitleStreamIndex,
     finalized: false,
     initialResumeTicks: Math.max(0, startTimeTicks),
+    playlistEntryIds: [],
+    playlistIndexes: [],
     loaded: false,
     subtitleRoute: subtitle && subtitleStreamIndex !== undefined ? {
       deliveryMethod: subtitle.DeliveryMethod || (subtitle.IsExternal ? 'External' : 'Embed'),
@@ -393,7 +397,7 @@ function emitPlayback(type: PlaybackEvent['type'], session: PlaybackSession | nu
   return snapshot
 }
 
-function reportPayload(session: PlaybackSession, entry: PlaybackEntry, eventName?: PlaybackProgressEvent, playlistIndex = entry.playlistIndex ?? session.currentIndex): PlaybackReportPayload {
+function reportPayload(session: PlaybackSession, entry: PlaybackEntry, eventName?: PlaybackProgressEvent, playlistIndex = session.currentIndex): PlaybackReportPayload {
   return {
     ItemId: entry.itemId,
     MediaSourceId: entry.source.Id,
@@ -483,7 +487,7 @@ async function finalizeEntry(session: PlaybackSession, entry: PlaybackEntry, rea
   const client = jellyfinClient
   if (client) {
     try {
-      await client.reportStopped(reportPayload(session, entry, undefined, entry.playlistIndex ?? session.currentIndex))
+      await client.reportStopped(reportPayload(session, entry, undefined, session.currentIndex))
       session.syncError = undefined
     } catch (error) {
       session.syncError = error instanceof Error ? error.message : `${currentServerLabel()} 播放结束状态上报失败`
@@ -609,27 +613,95 @@ async function activateLoadedEntry(session: PlaybackSession, entry: PlaybackEntr
   emitPlayback('snapshot', session)
 }
 
-async function refreshPlaylistMap(session: PlaybackSession): Promise<void> {
+function setPlaylistEntryIds(entry: PlaybackEntry, ids: number[]): void {
+  const uniqueIds = [...new Set(ids.filter((id) => Number.isInteger(id)))]
+  entry.playlistEntryIds = uniqueIds
+  entry.playlistIndexes = uniqueIds.map(() => -1)
+  entry.activePlaylistEntryId = uniqueIds[0]
+  entry.activePlaylistIndex = undefined
+}
+
+function firstPlaylistIndex(entry: PlaybackEntry): number | undefined {
+  if (!entry.playlistEntryIds.length || entry.playlistIndexes.some((index) => index < 0)) return undefined
+  const indexes = entry.playlistIndexes.filter((index) => index >= 0)
+  if (entry.activePlaylistIndex !== undefined) return entry.activePlaylistIndex
+  return indexes.length ? Math.min(...indexes) : undefined
+}
+
+function lastPlaylistIndex(entry: PlaybackEntry): number | undefined {
+  if (!entry.playlistEntryIds.length || entry.playlistIndexes.some((index) => index < 0)) return undefined
+  const indexes = entry.playlistIndexes.filter((index) => index >= 0)
+  return indexes.length ? Math.max(...indexes) : firstPlaylistIndex(entry)
+}
+
+function isLastPhysicalEntry(entry: PlaybackEntry, playlistEntryId?: number): boolean {
+  if (entry.playlistEntryIds.length <= 1 || playlistEntryId === undefined) return true
+  const offset = entry.playlistEntryIds.indexOf(playlistEntryId)
+  if (offset < 0) return true
+  if (entry.playlistIndexes.some((index) => index < 0)) return offset === entry.playlistEntryIds.length - 1
+  const known = entry.playlistEntryIds
+    .map((id, index) => ({ id, playlistIndex: entry.playlistIndexes[index] ?? -1 }))
+    .filter((value) => value.playlistIndex >= 0)
+    .sort((left, right) => left.playlistIndex - right.playlistIndex)
+  const lastKnown = known.at(-1)?.id
+  return lastKnown === undefined ? offset === entry.playlistEntryIds.length - 1 : playlistEntryId === lastKnown
+}
+
+async function refreshPlaylistMap(session: PlaybackSession, strict = false): Promise<void> {
   const value = await session.ipc.getProperty('playlist')
   if (!Array.isArray(value)) throw new Error('MPV 未返回有效的播放列表')
   const list = value as Array<{ id?: unknown }>
-  session.playlistEntryIds.clear()
-  session.queueIndexByPlaylistId.clear()
+  const playlistIndexes = new Map<number, number>()
   for (let playlistIndex = 0; playlistIndex < list.length; playlistIndex += 1) {
     const id = list[playlistIndex]?.id
-    const numericId = typeof id === 'number' ? id : undefined
-    const queueIndex = playlistIndex < session.queue.length ? playlistIndex : undefined
-    if (numericId === undefined || queueIndex === undefined) continue
-    const entry = session.entries.get(queueIndex)
-    if (!entry) continue
-    entry.playlistEntryId = numericId
-    entry.playlistIndex = playlistIndex
-    session.playlistEntryIds.set(queueIndex, numericId)
-    session.queueIndexByPlaylistId.set(numericId, queueIndex)
+    if (typeof id === 'number' && Number.isInteger(id)) playlistIndexes.set(id, playlistIndex)
   }
-  if (session.playlistEntryIds.size !== session.queue.length && !session.playlistTrimmed) {
+  session.queueIndexByPlaylistId.clear()
+  const claimedIds = new Set<number>()
+  for (const [queueIndex, entry] of session.entries) {
+    entry.playlistIndexes = entry.playlistEntryIds.map((id) => playlistIndexes.get(id) ?? -1)
+    entry.playlistIndexes.forEach((index, offset) => {
+      if (index >= 0) claimedIds.add(entry.playlistEntryIds[offset])
+    })
+    if (entry.activePlaylistEntryId !== undefined) {
+      const activeIndex = entry.playlistEntryIds.indexOf(entry.activePlaylistEntryId)
+      entry.activePlaylistIndex = activeIndex >= 0 && entry.playlistIndexes[activeIndex] >= 0
+        ? entry.playlistIndexes[activeIndex]
+        : undefined
+    }
+    entry.playlistEntryIds.forEach((id) => session.queueIndexByPlaylistId.set(id, queueIndex))
+  }
+
+  const unassignedEntries = [...session.entries.entries()].filter(([, entry]) => entry.playlistEntryIds.length === 0)
+  const unclaimedIds = list
+    .map((item) => item.id)
+    .filter((id): id is number => typeof id === 'number' && Number.isInteger(id) && !claimedIds.has(id))
+  for (let index = 0; index < Math.min(unassignedEntries.length, unclaimedIds.length); index += 1) {
+    const [queueIndex, entry] = unassignedEntries[index]
+    setPlaylistEntryIds(entry, [unclaimedIds[index]])
+    entry.playlistIndexes = [playlistIndexes.get(unclaimedIds[index]) ?? -1]
+    session.queueIndexByPlaylistId.set(unclaimedIds[index], queueIndex)
+  }
+
+  if (strict && (list.length !== session.queue.length || unassignedEntries.length > unclaimedIds.length)) {
     throw new Error('MPV 播放列表条目数量与应用队列不一致')
   }
+}
+
+function applyRedirectMapping(session: PlaybackSession, entry: PlaybackEntry, queueIndex: number, message: MpvIpcMessage): void {
+  const insertedId = message.playlist_insert_id
+  const insertedCount = message.playlist_insert_num_entries
+  if (typeof insertedId !== 'number' || !Number.isInteger(insertedId) || typeof insertedCount !== 'number' || !Number.isInteger(insertedCount) || insertedCount < 1) {
+    logger.info('playback', 'redirect', { sessionId: session.sessionId, itemId: entry.itemId, queueIndex, mapped: false })
+    return
+  }
+  entry.playlistEntryIds.forEach((id) => {
+    if (session.queueIndexByPlaylistId.get(id) === queueIndex) session.queueIndexByPlaylistId.delete(id)
+  })
+  const ids = Array.from({ length: insertedCount }, (_, index) => insertedId + index)
+  setPlaylistEntryIds(entry, ids)
+  ids.forEach((id) => session.queueIndexByPlaylistId.set(id, queueIndex))
+  logger.info('playback', 'redirect', { sessionId: session.sessionId, itemId: entry.itemId, queueIndex, mapped: true, insertedCount })
 }
 
 async function handleEndFile(session: PlaybackSession, message: MpvIpcMessage): Promise<void> {
@@ -638,7 +710,28 @@ async function handleEndFile(session: PlaybackSession, message: MpvIpcMessage): 
   const entry = queueIndex === undefined ? session.currentEntry : session.entries.get(queueIndex)
   if (!entry || entry.finalized) return
   const reason = message.reason || (message.file_error ? 'error' : 'eof')
+  if (reason === 'redirect') {
+    if (queueIndex !== undefined) {
+      applyRedirectMapping(session, entry, queueIndex, message)
+      await refreshPlaylistMap(session).catch((error) => {
+        logger.warn('playback', 'redirect-playlist-refresh-failed', {
+          sessionId: session.sessionId,
+          itemId: entry.itemId,
+          message: error instanceof Error ? error.message : String(error),
+        })
+      })
+    }
+    return
+  }
   if (reason === 'eof') {
+    if (!isLastPhysicalEntry(entry, message.playlist_entry_id)) {
+      logger.info('playback', 'physical-entry-finished', {
+        sessionId: session.sessionId,
+        itemId: entry.itemId,
+        playlistEntryId: message.playlist_entry_id,
+      })
+      return
+    }
     await finalizeEntry(session, entry, 'eof', true)
     const hasNext = queueIndex !== undefined && queueIndex + 1 < session.queue.length && !session.stopAfterCurrent && !session.playlistTrimmed
     if (!hasNext) await finishSession(session, 'eof', true)
@@ -653,9 +746,13 @@ async function handleEndFile(session: PlaybackSession, message: MpvIpcMessage): 
     }, 600)
     return
   }
-  if (reason === 'error') session.syncError = `《${entry.name}》加载失败：${message.file_error || 'MPV 返回加载错误'}`
+  if (reason === 'error' || reason === 'unknown') {
+    session.syncError = `《${entry.name}》加载失败：${message.file_error || `MPV 返回结束原因 ${reason}`}`
+    await finishSession(session, 'error', true)
+    if (!session.startupPending) emitPlayback('error', session, session.syncError)
+    return
+  }
   await finishSession(session, reason, true)
-  emitPlayback('error', session, session.syncError)
 }
 
 async function handleMpvEvent(session: PlaybackSession, message: MpvIpcMessage): Promise<void> {
@@ -667,10 +764,22 @@ async function handleMpvEvent(session: PlaybackSession, message: MpvIpcMessage):
     if (!entry) {
       session.phase = 'error'
       session.syncError = 'MPV 返回了未知的播放列表条目'
-      emitPlayback('error', session, session.syncError)
+      if (!session.startupPending) emitPlayback('error', session, session.syncError)
       return
     }
     if (index === undefined) return
+    const playlistOffset = typeof id === 'number' ? entry.playlistEntryIds.indexOf(id) : -1
+    if (playlistOffset >= 0) {
+      entry.activePlaylistEntryId = id
+      entry.activePlaylistIndex = entry.playlistIndexes[playlistOffset] >= 0 ? entry.playlistIndexes[playlistOffset] : undefined
+      if (entry.activePlaylistIndex === undefined) {
+        await refreshPlaylistMap(session)
+        const refreshedOffset = entry.playlistEntryIds.indexOf(id as number)
+        entry.activePlaylistIndex = refreshedOffset >= 0 && entry.playlistIndexes[refreshedOffset] >= 0
+          ? entry.playlistIndexes[refreshedOffset]
+          : undefined
+      }
+    }
     if (session.currentEntry === entry && entry.loaded) return
     session.currentIndex = index
     session.currentEntry = entry
@@ -722,7 +831,7 @@ async function attachMpvIpc(session: PlaybackSession): Promise<void> {
       session.eventChain = session.eventChain.then(() => handleMpvEvent(session, message)).catch((error) => {
         session.syncError = error instanceof Error ? error.message : 'MPV 播放事件处理失败'
         session.phase = 'error'
-        emitPlayback('error', session, session.syncError)
+        if (!session.startupPending) emitPlayback('error', session, session.syncError)
       })
     }
   })
@@ -762,13 +871,13 @@ async function startPlayback(request: StartPlaybackRequest): Promise<PlaybackSna
     stopAfterCurrent: false,
     stopped: false,
     queueWarnings: [],
-    playlistEntryIds: new Map(),
     queueIndexByPlaylistId: new Map(),
     eventChain: Promise.resolve(),
     pendingTransition: false,
     stopRequested: false,
     playlistTrimmed: false,
     playlistReady: false,
+    startupPending: true,
     audioPreference: request.audioPreference,
     subtitlePreference: request.subtitlePreference,
     gateway: new PlaybackGateway(client),
@@ -824,11 +933,18 @@ async function startPlayback(request: StartPlaybackRequest): Promise<PlaybackSna
   })
   child.once('error', (error) => {
     logger.error('mpv', 'process-error', error, { sessionId: session.sessionId })
-    void finishSession(session, 'error', true).finally(() => emitPlayback('error', session, `无法启动 MPV：${error.message}`))
+    void finishSession(session, 'error', true).finally(() => {
+      if (!session.startupPending) emitPlayback('error', session, `无法启动 MPV：${error.message}`)
+    })
   })
-  child.once('close', (code) => {
+  child.once('close', (code, signal) => {
     if (stderrBuffer.trim()) logger.warn('mpv', 'stderr', { sessionId: session.sessionId, message: stderrBuffer })
-    logger.info('mpv', 'process-closed', { sessionId: session.sessionId, code })
+    logger.info('mpv', 'process-closed', {
+      sessionId: session.sessionId,
+      code,
+      signal,
+      requested: Boolean(session.stopRequested || session.finalizePromise),
+    })
     if (!session.stopped && !session.finalizePromise) void finishSession(session, code === 0 ? 'quit' : 'error', false)
   })
   try {
@@ -840,18 +956,28 @@ async function startPlayback(request: StartPlaybackRequest): Promise<PlaybackSna
     await session.ipc.send(['keybind', 'MBTN_RIGHT', 'script-binding', 'select/select-playlist'])
     await session.ipc.send(['keybind', 'Ctrl+E', 'script-binding', 'select/select-playlist'])
     await session.ipc.send(['loadlist', playlistUrl, 'append'])
-    await refreshPlaylistMap(session)
+    await refreshPlaylistMap(session, true)
     session.playlistReady = true
     const selectedPlaylistEntry = session.entries.get(selectedPlayable)
-    if (!selectedPlaylistEntry?.playlistIndex && selectedPlaylistEntry?.playlistIndex !== 0) throw new Error('无法定位当前剧集在 MPV 播放列表中的位置')
-    const loaded = session.ipc.waitForEvent((message) => message.event === 'file-loaded' || message.event === 'end-file' || message.event === 'ipc-closed')
-    await session.ipc.send(['playlist-play-index', selectedPlaylistEntry.playlistIndex])
+    if (!selectedPlaylistEntry) throw new Error('无法定位当前剧集在 MPV 播放列表中的位置')
+    const selectedPlaylistIndex = firstPlaylistIndex(selectedPlaylistEntry)
+    if (selectedPlaylistIndex === undefined) throw new Error('无法定位当前剧集在 MPV 播放列表中的位置')
+    const loaded = session.ipc.waitForEvent((message) => {
+      if (message.event === 'end-file' && message.reason === 'redirect') return false
+      return message.event === 'file-loaded' || message.event === 'end-file' || message.event === 'ipc-closed'
+    })
+    await session.ipc.send(['playlist-play-index', selectedPlaylistIndex])
     const loadEvent = await loaded
-    if (loadEvent.event !== 'file-loaded') throw new Error(loadEvent.file_error || `《${selectedPlaylistEntry.name}》加载失败`)
+    if (loadEvent.event !== 'file-loaded') {
+      const reason = loadEvent.reason && loadEvent.reason !== 'unknown' ? `（${loadEvent.reason}）` : ''
+      throw new Error(loadEvent.file_error || `《${selectedPlaylistEntry.name}》加载失败${reason}`)
+    }
     session.currentEntry = selectedPlaylistEntry
     await activateLoadedEntry(session, selectedPlaylistEntry)
+    session.startupPending = false
     return emitPlayback('snapshot', session)
   } catch (error) {
+    session.startupPending = false
     await finishSession(session, 'error', true)
     throw error
   }
@@ -866,16 +992,22 @@ async function playbackCommand(request: PlaybackCommand): Promise<PlaybackSnapsh
       await finishSession(session, 'quit', true)
     } else if (request.command === 'stop-after-current') {
       session.stopAfterCurrent = !session.stopAfterCurrent
-      if (session.stopAfterCurrent && session.currentEntry?.playlistIndex !== undefined) {
-        const currentPlaylistIndex = session.currentEntry.playlistIndex
+      let currentPlaylistIndex = session.currentEntry ? lastPlaylistIndex(session.currentEntry) : undefined
+      if (session.stopAfterCurrent && currentPlaylistIndex === undefined) {
+        await refreshPlaylistMap(session)
+        currentPlaylistIndex = session.currentEntry ? lastPlaylistIndex(session.currentEntry) : undefined
+      }
+      if (session.stopAfterCurrent && currentPlaylistIndex !== undefined) {
         const playlist = await session.ipc.getProperty('playlist')
         if (Array.isArray(playlist)) {
           for (let index = playlist.length - 1; index > currentPlaylistIndex; index -= 1) await session.ipc.send(['playlist-remove', index])
           for (let index = session.currentIndex + 1; index < session.queue.length; index += 1) {
             const entry = session.entries.get(index)
             if (entry) {
-              entry.playlistEntryId = undefined
-              entry.playlistIndex = undefined
+              entry.playlistEntryIds = []
+              entry.playlistIndexes = []
+              entry.activePlaylistEntryId = undefined
+              entry.activePlaylistIndex = undefined
             }
           }
           session.playlistTrimmed = true
@@ -883,7 +1015,7 @@ async function playbackCommand(request: PlaybackCommand): Promise<PlaybackSnapsh
         }
       } else if (!session.stopAfterCurrent && session.playlistTrimmed) {
         const tail = Array.from(session.entries.entries())
-          .filter(([index, entry]) => index > session.currentIndex && entry.playlistEntryId === undefined)
+          .filter(([index, entry]) => index > session.currentIndex && entry.playlistEntryIds.length === 0)
           .map(([, entry]) => ({ item: entry, url: buildStreamUrl(session, entry) }))
         if (tail.length) await session.ipc.send(['loadlist', buildHexPlaylistUrl(tail), 'append'])
         session.playlistTrimmed = false
@@ -896,9 +1028,14 @@ async function playbackCommand(request: PlaybackCommand): Promise<PlaybackSnapsh
       const nextIndex = request.command === 'next' ? session.currentIndex + 1 : session.currentIndex - 1
       if (nextIndex >= 0 && nextIndex < session.queue.length) {
         session.pendingTransition = true
-        const targetPlaylistIndex = session.entries.get(nextIndex)?.playlistIndex
+        const targetEntry = session.entries.get(nextIndex)
+        let targetPlaylistIndex = targetEntry ? firstPlaylistIndex(targetEntry) : undefined
+        if (targetPlaylistIndex === undefined) {
+          await refreshPlaylistMap(session)
+          targetPlaylistIndex = targetEntry ? firstPlaylistIndex(targetEntry) : undefined
+        }
         if (targetPlaylistIndex === undefined) throw new Error('目标剧集不在 MPV 播放列表中')
-        await session.ipc.send([request.command === 'next' ? 'playlist-next' : 'playlist-prev'])
+        await session.ipc.send(['playlist-play-index', targetPlaylistIndex])
       }
     }
   } catch (error) {

@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   spawnSyncMock: vi.fn(),
   fetchMock: vi.fn(),
   writeFileSyncMock: vi.fn(),
+  waitSequences: [] as MpvIpcMessage[][],
   mainWindow: null as any,
   logger: {
     initialize: vi.fn(),
@@ -42,11 +43,20 @@ class FakeMpvIpc {
   readonly getProperty = vi.fn(async (name: string) => this.properties.get(name))
   readonly connectWithRetry = vi.fn(async () => undefined)
   readonly observeProperty = vi.fn(async () => undefined)
-  readonly waitForEvent = vi.fn(async () => ({ event: 'file-loaded' as const }))
+  readonly waitSequence: MpvIpcMessage[]
+  readonly waitForEvent = vi.fn(async (predicate: (message: MpvIpcMessage) => boolean) => {
+    while (this.waitSequence.length) {
+      const message = this.waitSequence.shift() as MpvIpcMessage
+      this.emit(message)
+      if (predicate(message)) return message
+    }
+    return { event: 'file-loaded' as const }
+  })
   readonly close = vi.fn()
 
   constructor(pipeName: string) {
     this.pipeName = pipeName
+    this.waitSequence = mocks.waitSequences.shift() || []
     mocks.mpvInstances.push(this)
   }
 
@@ -183,6 +193,7 @@ describe('Electron main process IPC orchestration', () => {
     mocks.writeFileSyncMock.mockReset()
     mocks.spawnMock.mockReset()
     mocks.spawnSyncMock.mockReset()
+    mocks.waitSequences.length = 0
     mocks.mpvInstances.length = 0
     mocks.spawnSyncMock.mockReturnValue({ status: 0, stdout: 'mpv 0.41.0', stderr: '' })
     mocks.spawnMock.mockImplementation(() => makeChild())
@@ -314,6 +325,60 @@ describe('Electron main process IPC orchestration', () => {
     const stopped = await handler('playback:snapshot')()
     expect(stopped.phase).toBe('stopped')
     expect(mocks.fetchMock.mock.calls.some(([url]) => url.includes('/Sessions/Playing/Stopped'))).toBe(true)
+  })
+
+  it('keeps MPV alive through redirect playlist expansion and finalizes only the last physical entry', async () => {
+    const movie = { Id: 'movie-redirect', Name: '重定向测试', Type: 'Movie', MediaStreams: [] }
+    const playbackInfo = {
+      PlaySessionId: 'redirect-session',
+      MediaSources: [{ Id: 'redirect-source', SupportsDirectPlay: true }],
+    }
+    mocks.waitSequences.push([
+      { event: 'start-file', playlist_entry_id: 1 },
+      { event: 'end-file', reason: 'redirect', playlist_entry_id: 1, playlist_insert_id: 10, playlist_insert_num_entries: 2 },
+      { event: 'start-file', playlist_entry_id: 10 },
+      { event: 'file-loaded' },
+    ])
+    mocks.fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes('/Items/movie-redirect/PlaybackInfo')) return jsonResponse(playbackInfo)
+      if (url.includes('/Users/user-1/Items/movie-redirect')) return jsonResponse(movie)
+      return new Response(null, { status: 204 })
+    })
+
+    const snapshot = await handler('playback:start')({}, { itemId: movie.Id })
+    const child = mocks.spawnMock.mock.results.at(-1)?.value as ReturnType<typeof makeChild>
+    const ipc = mocks.mpvInstances.at(-1)
+    expect(snapshot).toMatchObject({ phase: 'playing', currentItemId: movie.Id })
+    expect(child.kill).not.toHaveBeenCalled()
+    expect(mocks.mainWindow.webContents.send.mock.calls.some(([channel, payload]) => channel === 'playback:changed' && payload.type === 'error')).toBe(false)
+
+    ipc?.emit({ event: 'end-file', reason: 'eof', playlist_entry_id: 10 })
+    await flush()
+    expect((await handler('playback:snapshot')()).phase).toBe('playing')
+    expect(mocks.fetchMock.mock.calls.filter(([url]) => url.includes('/Sessions/Playing/Stopped')).length).toBe(0)
+
+    ipc?.emit({ event: 'end-file', reason: 'eof', playlist_entry_id: 11 })
+    await flush()
+    await flush()
+    expect((await handler('playback:snapshot')()).phase).toBe('stopped')
+    expect(mocks.fetchMock.mock.calls.filter(([url]) => url.includes('/Sessions/Playing/Stopped')).length).toBe(1)
+  })
+
+  it('returns startup MPV errors once without publishing a duplicate renderer error event', async () => {
+    const movie = { Id: 'movie-error', Name: '错误测试', Type: 'Movie', MediaStreams: [] }
+    mocks.waitSequences.push([
+      { event: 'start-file', playlist_entry_id: 1 },
+      { event: 'end-file', reason: 'error', file_error: 'network unreachable', playlist_entry_id: 1 },
+    ])
+    mocks.fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes('/Items/movie-error/PlaybackInfo')) return jsonResponse({ MediaSources: [{ Id: 'error-source', SupportsDirectPlay: true }] })
+      if (url.includes('/Users/user-1/Items/movie-error')) return jsonResponse(movie)
+      return new Response(null, { status: 204 })
+    })
+
+    await expect(handler('playback:start')({}, { itemId: movie.Id })).rejects.toThrow('network unreachable')
+    expect((await handler('playback:snapshot')()).phase).toBe('error')
+    expect(mocks.mainWindow.webContents.send.mock.calls.filter(([channel, payload]) => channel === 'playback:changed' && payload.type === 'error')).toHaveLength(0)
   })
 
   it('rejects explicit audio and subtitle selections instead of silently falling back', async () => {

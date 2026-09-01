@@ -35,10 +35,12 @@ describe('consumeJsonLines', () => {
     const parsed = consumeJsonLines('', [
       '{"event":"end-file","reason":"eof"}',
       '{"event":"end-file","reason":"quit"}',
-      '{"event":"end-file","reason":"error","file_error":"not found"}',
+      '{"event":"end-file","reason":"error","file_error":"not found","playlist_insert_id":10,"playlist_insert_num_entries":2}',
     ].join('\n') + '\n')
     expect(parsed.messages.map((message) => message.reason)).toEqual(['eof', 'quit', 'error'])
     expect(parsed.messages[2].file_error).toBe('not found')
+    expect(parsed.messages[2].playlist_insert_id).toBe(10)
+    expect(parsed.messages[2].playlist_insert_num_entries).toBe(2)
   })
 
   it('waits for a fake MPV file-loaded event after connecting', async () => {
