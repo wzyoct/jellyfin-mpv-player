@@ -4,7 +4,7 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App.vue'
 import type {
-  MediaServerApi,
+  JellyfinApi,
   MediaItem,
   PlaybackEvent,
   PlaybackSnapshot,
@@ -12,12 +12,11 @@ import type {
 } from './types'
 
 const settings = (connected = false): PublicSettings => ({
-  serverUrl: 'http://media.example.test/emby',
+  serverUrl: 'http://media.example.test',
   username: connected ? 'mickey' : '',
   userId: connected ? 'user-1' : undefined,
-  serverKind: connected ? 'emby' : undefined,
-  serverName: connected ? 'Emby Server' : undefined,
-  serverVersion: connected ? '4.9.5.0' : undefined,
+  serverName: connected ? 'Jellyfin Server' : undefined,
+  serverVersion: connected ? '10.11.11' : undefined,
   mpvPath: 'mpv.exe',
   connected,
   secureStorageAvailable: true,
@@ -41,7 +40,7 @@ const idleSnapshot = (): PlaybackSnapshot => ({
   positionTicks: 0,
 })
 
-function createApi(overrides: Partial<Record<keyof MediaServerApi, unknown>> = {}): MediaServerApi {
+function createApi(overrides: Partial<Record<keyof JellyfinApi, unknown>> = {}): JellyfinApi {
   const api: Record<string, unknown> = {
     getSettings: vi.fn(async () => settings(false)),
     saveSettings: vi.fn(async () => settings(true)),
@@ -67,7 +66,7 @@ function createApi(overrides: Partial<Record<keyof MediaServerApi, unknown>> = {
     onPlaybackChanged: vi.fn(() => vi.fn()),
   }
   Object.assign(api, overrides)
-  return api as unknown as MediaServerApi
+  return api as unknown as JellyfinApi
 }
 
 const iconNames = [
@@ -91,14 +90,14 @@ stubs.MediaRail = {
 
 const mountedWrappers: VueWrapper[] = []
 
-function mountApp(api: MediaServerApi, attachTo?: Element): VueWrapper {
-  window.mediaServer = api
+function mountApp(api: JellyfinApi, attachTo?: Element): VueWrapper {
+  window.jellyfin = api
   const wrapper = mount(App, { attachTo, global: { stubs } })
   mountedWrappers.push(wrapper)
   return wrapper
 }
 
-function connectedHomeApi(): MediaServerApi {
+function connectedHomeApi(): JellyfinApi {
   const latest = movie('latest-1', '最近加入')
   const recommended = movie('recommended-1', '推荐电影')
   const continued = { ...movie('continue-1', '继续观看'), UserData: { PlaybackPositionTicks: 10_000_000 } }
@@ -148,7 +147,6 @@ describe('App', () => {
       getSettings: vi.fn(async () => ({
         ...settings(true),
         serverUrl: 'http://media.example.test/jellyfin',
-        serverKind: 'jellyfin',
         serverName: 'Home Jellyfin',
         serverVersion: '10.11.11',
       })),

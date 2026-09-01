@@ -119,9 +119,9 @@ const form = reactive({
 })
 
 const isConnected = computed(() => Boolean(settings.value?.connected))
-const serverLabel = computed(() => settings.value?.connected && settings.value.serverKind === 'emby' ? 'Emby' : 'Jellyfin')
+const serverLabel = computed(() => 'Jellyfin')
 const serverDescriptor = computed(() => {
-  if (!settings.value?.connected) return 'Jellyfin 优先，兼容 Emby'
+  if (!settings.value?.connected) return 'Jellyfin'
   const name = settings.value.serverName || serverLabel.value
   const version = settings.value.serverVersion && settings.value.serverVersion !== 'legacy' ? ` ${settings.value.serverVersion}` : ''
   return `${name}${version}`
@@ -131,9 +131,9 @@ const heroItems = computed(() => recommendationItems.value.length ? recommendati
 const heroIndex = ref(0)
 const heroItem = computed(() => heroItems.value[heroIndex.value] || heroItems.value[0])
 const isImmersiveHome = computed(() => activePage.value === 'home' && Boolean(heroItem.value))
-const heroDisplayedItem = ref<MediaItem>()
-const heroOutgoingItem = ref<MediaItem>()
-const heroLoadedId = ref('')
+const heroSlots = ref<[MediaItem, MediaItem]>([undefined as unknown as MediaItem, undefined as unknown as MediaItem])
+const heroVisibleSlot = ref(0)
+const heroLoadedSlots = ref<[boolean, boolean]>([false, false])
 const heroLabel = computed(() => recommendationItems.value.length ? '电影推荐' : '最近加入')
 const displayItems = computed(() => {
   return libraryItems.value
@@ -225,7 +225,7 @@ async function loadAllItems(options: ItemsQuery): Promise<MediaItem[]> {
   let totalRecordCount = Number.POSITIVE_INFINITY
   let pageCount = 0
   while (startIndex < totalRecordCount && pageCount < 200) {
-    const result = await window.mediaServer.getItems({ ...options, startIndex, limit: 100 })
+    const result = await window.jellyfin.getItems({ ...options, startIndex, limit: 100 })
     items.push(...result.Items)
     totalRecordCount = result.TotalRecordCount
     if (!result.Items.length) break
@@ -244,44 +244,35 @@ function stopHeroAutoPlay(): void {
   heroTimer = undefined
 }
 
-let heroTransitionTimer: ReturnType<typeof setTimeout> | undefined
-
 watch(heroItem, (next) => {
   if (!next) {
-    heroDisplayedItem.value = undefined
-    heroOutgoingItem.value = undefined
-    heroLoadedId.value = ''
+    heroSlots.value = [undefined as unknown as MediaItem, undefined as unknown as MediaItem]
+    heroVisibleSlot.value = 0
+    heroLoadedSlots.value = [false, false]
     return
   }
-  if (!heroDisplayedItem.value) {
-    heroDisplayedItem.value = next
-    heroLoadedId.value = ''
+  const active = heroSlots.value[heroVisibleSlot.value]
+  if (!active) {
+    heroSlots.value[0] = next
+    heroVisibleSlot.value = 0
+    heroLoadedSlots.value[0] = false
     return
   }
-  if (heroDisplayedItem.value.Id === next.Id) return
-  heroOutgoingItem.value = heroDisplayedItem.value
-  heroDisplayedItem.value = next
-  heroLoadedId.value = ''
-  if (heroTransitionTimer) clearTimeout(heroTransitionTimer)
+  if (active.Id === next.Id) return
+  const inactive = heroVisibleSlot.value === 0 ? 1 : 0
+  heroSlots.value[inactive] = next
+  heroLoadedSlots.value[inactive] = false
 }, { immediate: true })
 
-function finishHeroTransition(): void {
-  if (!heroDisplayedItem.value) return
-  heroLoadedId.value = heroDisplayedItem.value.Id
-  if (heroTransitionTimer) clearTimeout(heroTransitionTimer)
-  heroTransitionTimer = setTimeout(() => {
-    heroOutgoingItem.value = undefined
-  }, 620)
+function handleHeroImageLoaded(itemId: string, slot: number): void {
+  if (heroSlots.value[slot]?.Id !== itemId) return
+  heroLoadedSlots.value[slot] = true
+  heroVisibleSlot.value = slot
 }
 
-function handleHeroImageLoaded(itemId: string): void {
-  if (heroDisplayedItem.value?.Id !== itemId) return
-  finishHeroTransition()
-}
-
-function handleHeroImageFailed(itemId: string): void {
-  if (heroDisplayedItem.value?.Id !== itemId) return
-  finishHeroTransition()
+function handleHeroImageFailed(itemId: string, slot: number): void {
+  if (heroSlots.value[slot]?.Id !== itemId) return
+  heroLoadedSlots.value[slot] = false
 }
 
 function startHeroAutoPlay(): void {
@@ -317,7 +308,7 @@ async function loadHome(): Promise<void> {
   homeLoading.value = true
   homeError.value = ''
   try {
-    const nextViews = await window.mediaServer.getViews()
+    const nextViews = await window.jellyfin.getViews()
     if (requestId !== homeRequestId) return
     views.value = nextViews
     if (!views.value.some((view) => view.Id === activeViewId.value)) {
@@ -325,11 +316,11 @@ async function loadHome(): Promise<void> {
     }
     recommendationError.value = ''
     const [recommendations, latest, continued, nextUp, allItems] = await Promise.all([
-      window.mediaServer.getMovieRecommendations().catch((error: unknown) => {
+      window.jellyfin.getMovieRecommendations().catch((error: unknown) => {
         recommendationError.value = error instanceof Error ? error.message : '读取电影推荐失败'
         return []
       }),
-      window.mediaServer.getItems({
+      window.jellyfin.getItems({
         recursive: true,
         includeItemTypes: 'Movie,Series',
         sortBy: 'DateCreated',
@@ -343,7 +334,7 @@ async function loadHome(): Promise<void> {
         sortBy: 'DatePlayed',
         sortOrder: 'Descending',
       }),
-      window.mediaServer.getNextUp().catch(() => ({ Items: [], TotalRecordCount: 0 })),
+      window.jellyfin.getNextUp().catch(() => ({ Items: [], TotalRecordCount: 0 })),
       loadAllItems({
         recursive: true,
         includeItemTypes: 'Movie,Series',
@@ -384,7 +375,7 @@ async function refreshContinueItems(): Promise<void> {
       sortOrder: 'Descending',
     })
     continueItems.value = uniqueItems(continued)
-    const nextUp = await window.mediaServer.getNextUp().catch(() => ({ Items: [], TotalRecordCount: 0 }))
+    const nextUp = await window.jellyfin.getNextUp().catch(() => ({ Items: [], TotalRecordCount: 0 }))
     nextUpItems.value = uniqueItems(nextUp.Items || []).slice(0, 24)
   } catch (error) {
     showNotice(error instanceof Error ? `继续观看刷新失败：${error.message}` : '继续观看刷新失败', 'error')
@@ -404,7 +395,7 @@ async function loadLibrary(viewId = activeViewId.value, filter = activeFilter.va
     let totalRecordCount = Number.POSITIVE_INFINITY
     let pageCount = 0
     while (startIndex < totalRecordCount && pageCount < 200) {
-      const result = await window.mediaServer.getItems({
+      const result = await window.jellyfin.getItems({
         parentId: resolvedViewId || undefined,
         recursive: true,
         includeItemTypes: filter === 'all' ? 'Movie,Series' : filter,
@@ -452,7 +443,7 @@ async function submitConnection(): Promise<void> {
   errorMessage.value = ''
   if (isConnected.value && !form.password.trim()) {
     try {
-      applySettings(await window.mediaServer.saveSettings({
+      applySettings(await window.jellyfin.saveSettings({
         serverUrl: form.serverUrl,
         username: form.username,
         mpvPath: form.mpvPath,
@@ -469,7 +460,7 @@ async function submitConnection(): Promise<void> {
   }
   isLoading.value = true
   try {
-    const result = await window.mediaServer.login({
+    const result = await window.jellyfin.login({
       serverUrl: form.serverUrl,
       username: form.username,
       password: form.password,
@@ -478,7 +469,7 @@ async function submitConnection(): Promise<void> {
     applySettings(result.settings)
     form.password = ''
     activePage.value = 'home'
-    showNotice(`已连接到 ${result.settings.serverKind === 'emby' ? 'Emby' : 'Jellyfin'}，欢迎回来，${result.user.Name}`)
+    showNotice(`已连接到 Jellyfin，欢迎回来，${result.user.Name}`)
     await loadHome()
   } catch (error) {
     errorMessage.value = error instanceof Error ? error.message : `连接 ${serverLabel.value} 失败`
@@ -490,7 +481,7 @@ async function submitConnection(): Promise<void> {
 async function disconnect(): Promise<void> {
   try {
     const previousServerLabel = serverLabel.value
-    applySettings(await window.mediaServer.logout())
+    applySettings(await window.jellyfin.logout())
     views.value = []
     libraryItems.value = []
     homeAllItems.value = []
@@ -511,8 +502,8 @@ async function disconnect(): Promise<void> {
 async function validateMpv(test = false): Promise<void> {
   try {
     mpvValidation.value = test
-      ? await window.mediaServer.testMpvPath(form.mpvPath)
-      : await window.mediaServer.validateMpvPath(form.mpvPath)
+      ? await window.jellyfin.testMpvPath(form.mpvPath)
+      : await window.jellyfin.validateMpvPath(form.mpvPath)
     showNotice(mpvValidation.value.message, mpvValidation.value.valid ? 'success' : 'error')
   } catch (error) {
     mpvValidation.value = { valid: false, path: form.mpvPath, message: error instanceof Error ? error.message : 'MPV 检测失败' }
@@ -522,7 +513,7 @@ async function validateMpv(test = false): Promise<void> {
 
 async function openLogDirectory(): Promise<void> {
   try {
-    await window.mediaServer.openLogDirectory()
+    await window.jellyfin.openLogDirectory()
     showNotice('日志目录已打开')
   } catch (error) {
     showNotice(error instanceof Error ? error.message : '无法打开日志目录', 'error')
@@ -541,7 +532,7 @@ async function performSearch(): Promise<void> {
   searchLoading.value = true
   searchError.value = ''
   try {
-    const result = await window.mediaServer.getItems({
+    const result = await window.jellyfin.getItems({
       searchTerm: term,
       recursive: true,
       includeItemTypes: 'Movie,Series,Episode',
@@ -562,7 +553,7 @@ function focusSearch(): void {
 
 async function setFullScreen(enabled: boolean): Promise<void> {
   try {
-    isFullScreen.value = await window.mediaServer.setFullScreen(enabled)
+    isFullScreen.value = await window.jellyfin.setFullScreen(enabled)
   } catch (error) {
     showNotice(error instanceof Error ? error.message : '切换全屏失败', 'error')
   }
@@ -601,7 +592,7 @@ watch(searchTerm, () => {
 async function loadPlayableDetails(item: MediaItem): Promise<void> {
   isDetailLoading.value = true
   try {
-    playbackInfo.value = await window.mediaServer.getPlaybackInfo(item.Id)
+    playbackInfo.value = await window.jellyfin.getPlaybackInfo(item.Id)
     const streams = (playbackInfo.value.MediaSources?.[0]?.MediaStreams || item.MediaStreams || []) as MediaStream[]
     selectedAudio.value = streams.find((stream) => stream.Type === 'Audio' && stream.IsDefault)?.Index
       ?? streams.find((stream) => stream.Type === 'Audio')?.Index
@@ -623,11 +614,11 @@ async function openDetails(item: MediaItem): Promise<void> {
   selectedSubtitle.value = null
   isDetailLoading.value = true
   try {
-    const detailed = await window.mediaServer.getItem(item.Id)
+    const detailed = await window.jellyfin.getItem(item.Id)
     if (requestId !== detailRequestId) return
     selectedItem.value = detailed
     if (detailed.Type === 'Series') {
-      const seasons = await window.mediaServer.getItems({
+      const seasons = await window.jellyfin.getItems({
         parentId: detailed.Id,
         recursive: false,
         includeItemTypes: 'Season',
@@ -637,7 +628,7 @@ async function openDetails(item: MediaItem): Promise<void> {
       if (requestId !== detailRequestId) return
       seasonItems.value = seasons.Items
     } else if (detailed.Type === 'Season') {
-      const episodes = await window.mediaServer.getItems({
+      const episodes = await window.jellyfin.getItems({
         parentId: detailed.Id,
         recursive: false,
         includeItemTypes: 'Episode',
@@ -674,7 +665,7 @@ async function playSelected(): Promise<void> {
   const item = selectedItem.value
   if (!item || (item.Type !== 'Movie' && item.Type !== 'Episode')) return
   try {
-    const snapshot = await window.mediaServer.playbackStart({
+    const snapshot = await window.jellyfin.playbackStart({
       itemId: item.Id,
       mediaSourceId: selectedSource.value?.Id,
       audioPreference: { index: selectedAudio.value },
@@ -692,7 +683,7 @@ async function playSelected(): Promise<void> {
 
 async function playItemDirect(item: MediaItem): Promise<void> {
   try {
-    const snapshot = await window.mediaServer.playbackStart({
+    const snapshot = await window.jellyfin.playbackStart({
       itemId: item.Id,
     })
     handlePlaybackSnapshot(snapshot)
@@ -706,7 +697,7 @@ async function stopPlayback(): Promise<void> {
   const sessionId = playbackSnapshot.value.sessionId
   if (!sessionId) return
   try {
-    handlePlaybackSnapshot(await window.mediaServer.playbackCommand({ sessionId, command: 'stop' }))
+    handlePlaybackSnapshot(await window.jellyfin.playbackCommand({ sessionId, command: 'stop' }))
   } catch (error) {
     showNotice(error instanceof Error ? error.message : '停止播放失败', 'error')
   }
@@ -735,7 +726,7 @@ async function refreshPlaybackData(snapshot: PlaybackSnapshot, notifyOnFailure =
   for (const delay of [0, 400, 1200]) {
     if (delay) await new Promise((resolve) => setTimeout(resolve, delay))
     try {
-      lastItem = await window.mediaServer.getItem(itemId)
+      lastItem = await window.jellyfin.getItem(itemId)
       const update = (items: MediaItem[]) => items.map((item) => item.Id === lastItem?.Id ? { ...item, ...lastItem } : item)
       libraryItems.value = update(libraryItems.value)
       homeAllItems.value = update(homeAllItems.value)
@@ -769,14 +760,14 @@ async function togglePlaybackPause(): Promise<void> {
   const sessionId = playbackSnapshot.value.sessionId
   if (!sessionId) return
   const command = playbackSnapshot.value.phase === 'paused' ? 'resume' : 'pause'
-  handlePlaybackSnapshot(await window.mediaServer.playbackCommand({ sessionId, command }))
+  handlePlaybackSnapshot(await window.jellyfin.playbackCommand({ sessionId, command }))
 }
 
 async function sendPlaybackCommand(command: 'previous' | 'next' | 'stop-after-current'): Promise<void> {
   const sessionId = playbackSnapshot.value.sessionId
   if (!sessionId) return
   try {
-    handlePlaybackSnapshot(await window.mediaServer.playbackCommand({ sessionId, command }))
+    handlePlaybackSnapshot(await window.jellyfin.playbackCommand({ sessionId, command }))
   } catch (error) {
     showNotice(error instanceof Error ? error.message : '播放控制失败', 'error')
   }
@@ -786,7 +777,7 @@ async function retryPlayback(): Promise<void> {
   const itemId = playbackSnapshot.value.currentItemId || playbackSnapshot.value.queue[playbackSnapshot.value.currentIndex]?.itemId
   if (!itemId) return
   try {
-    const snapshot = await window.mediaServer.playbackStart({
+    const snapshot = await window.jellyfin.playbackStart({
       itemId,
       startTimeTicks: playbackSnapshot.value.positionTicks,
     })
@@ -799,30 +790,30 @@ async function retryPlayback(): Promise<void> {
 function handleWindowFocus(): void {
   if (focusRefreshTimer) clearTimeout(focusRefreshTimer)
   focusRefreshTimer = setTimeout(async () => {
-    const snapshot = await window.mediaServer.getPlaybackSnapshot()
+    const snapshot = await window.jellyfin.getPlaybackSnapshot()
     if (snapshot.revision > playbackSnapshot.value.revision) handlePlaybackChanged({ ...snapshot, type: 'snapshot' })
   }, 80)
 }
 
 onMounted(async () => {
   window.addEventListener('keydown', handleKeydown)
-  if (!window.mediaServer) {
-    errorMessage.value = '请通过 Ember Player 桌面应用启动此页面'
+  if (!window.jellyfin) {
+    errorMessage.value = '请通过 Jellyfin MPV Player 桌面应用启动此页面'
     activePage.value = 'settings'
     appBooted.value = true
     return
   }
   window.addEventListener('focus', handleWindowFocus)
   try {
-    removeFullScreenListener = window.mediaServer.onFullScreenChanged((enabled) => {
+    removeFullScreenListener = window.jellyfin.onFullScreenChanged((enabled) => {
       isFullScreen.value = enabled
     })
-    isFullScreen.value = await window.mediaServer.getFullScreen()
-    const saved = await window.mediaServer.getSettings()
+    isFullScreen.value = await window.jellyfin.getFullScreen()
+    const saved = await window.jellyfin.getSettings()
     applySettings(saved)
     appBooted.value = true
-    removePlaybackListener = window.mediaServer.onPlaybackChanged(handlePlaybackChanged)
-    handlePlaybackSnapshot(await window.mediaServer.getPlaybackSnapshot())
+    removePlaybackListener = window.jellyfin.onPlaybackChanged(handlePlaybackChanged)
+    handlePlaybackSnapshot(await window.jellyfin.getPlaybackSnapshot())
     if (saved.connected) {
       await loadHome()
     } else {
@@ -841,7 +832,6 @@ onUnmounted(() => {
   if (searchTimer) clearTimeout(searchTimer)
   if (noticeTimer) clearTimeout(noticeTimer)
   stopHeroAutoPlay()
-  if (heroTransitionTimer) clearTimeout(heroTransitionTimer)
   if (focusRefreshTimer) clearTimeout(focusRefreshTimer)
   removePlaybackListener?.()
   removeFullScreenListener?.()
@@ -853,7 +843,7 @@ onUnmounted(() => {
     <header v-if="isConnected" class="topbar" :class="{ 'topbar--scrolled': isContentScrolled, 'topbar--immersive': isImmersiveHome }">
       <button class="brand" type="button" aria-label="返回首页" @click="goHome">
         <span class="brand-mark">E</span>
-        <span class="brand-copy">EMBER<span>PLAYER</span></span>
+        <span class="brand-copy">JELLYFIN<span>MPV PLAYER</span></span>
       </button>
 
       <nav class="main-nav" aria-label="主导航">
@@ -904,25 +894,25 @@ onUnmounted(() => {
       <section v-if="!appBooted" class="boot-screen" aria-busy="true" aria-live="polite">
         <span class="brand-mark">E</span>
         <LoaderCircle class="spin" :size="22" />
-        <span>正在准备 Ember Player</span>
+        <span>正在准备 Jellyfin MPV Player</span>
       </section>
 
       <section v-else-if="!isConnected || activePage === 'settings'" class="settings-page">
         <div v-if="!isConnected" class="standalone-intro">
           <div class="brand standalone-brand">
             <span class="brand-mark">E</span>
-            <span class="brand-copy">EMBER<span>PLAYER</span></span>
+            <span class="brand-copy">JELLYFIN<span>MPV PLAYER</span></span>
           </div>
           <p class="eyebrow">YOUR PERSONAL CINEMA</p>
           <h1>把你的片库，<br /><em>交给更好的播放器。</em></h1>
-          <p class="intro-copy">连接 Jellyfin，浏览完整媒体库，并用 MPV 播放每一个你真正想看的画面。也兼容 Emby。</p>
+          <p class="intro-copy">连接 Jellyfin，浏览完整媒体库，并用 MPV 播放每一个你真正想看的画面。</p>
         </div>
 
         <div class="settings-layout">
           <div class="settings-heading">
             <p class="eyebrow">CONNECTION</p>
             <h2>{{ isConnected ? '连接设置' : '连接你的 Jellyfin' }}</h2>
-            <p>填写 Jellyfin 服务地址和账号，应用会在本机保存加密的登录令牌；Emby 服务器也可以直接连接。</p>
+            <p>填写 Jellyfin 服务地址和账号，应用会在本机保存加密的登录令牌。</p>
             <p v-if="isConnected" class="server-identity">当前服务：{{ serverDescriptor }}</p>
           </div>
           <form class="settings-form" @submit.prevent="submitConnection">
@@ -966,7 +956,7 @@ onUnmounted(() => {
           <div>
             <p class="eyebrow">RELEASE NOTES</p>
             <h1>更新记录</h1>
-            <p>按版本查看 Ember Player 的功能、优化与修复。</p>
+            <p>按版本查看 Jellyfin MPV Player 的功能、优化与修复。</p>
           </div>
           <div class="current-version">
             <span>当前版本</span>
@@ -1011,27 +1001,20 @@ onUnmounted(() => {
             @focusout="setHeroPaused(false)"
           >
             <div class="hero-backdrops" aria-hidden="true">
-              <PosterImage
-                v-if="heroOutgoingItem"
-                :key="`outgoing-${heroOutgoingItem.Id}`"
-                :item="heroOutgoingItem"
-                class="hero-layer hero-layer--outgoing"
-                variant="backdrop"
-                eager
-                :max-width="3840"
-              />
-              <PosterImage
-                v-if="heroDisplayedItem"
-                :key="`displayed-${heroDisplayedItem.Id}`"
-                :item="heroDisplayedItem"
-                class="hero-layer"
-                :class="{ 'hero-layer--visible': heroLoadedId === heroDisplayedItem.Id }"
-                variant="backdrop"
-                eager
-                :max-width="3840"
-                @loaded="handleHeroImageLoaded(heroDisplayedItem.Id)"
-                @failed="handleHeroImageFailed(heroDisplayedItem.Id)"
-              />
+              <template v-for="(slot, index) in heroSlots" :key="`hero-slot-${index}`">
+                <PosterImage
+                  v-if="slot?.Id"
+                  :item="slot"
+                  class="hero-layer"
+                  :class="{ 'hero-layer--visible': heroVisibleSlot === index && heroLoadedSlots[index] }"
+                  variant="backdrop"
+                  eager
+                  retain-on-failure
+                  :max-width="3840"
+                  @loaded="handleHeroImageLoaded(slot.Id, index)"
+                  @failed="handleHeroImageFailed(slot.Id, index)"
+                />
+              </template>
             </div>
             <div class="hero-overlay"></div>
             <div class="hero-content">

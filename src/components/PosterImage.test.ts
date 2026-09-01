@@ -17,10 +17,10 @@ describe('PosterImage', () => {
   const originalIntersectionObserver = window.IntersectionObserver
 
   beforeEach(() => {
-    window.mediaServer = {
+    window.jellyfin = {
       getImage: vi.fn(),
       getItem: vi.fn(),
-    } as unknown as Window['mediaServer']
+    } as unknown as Window['jellyfin']
   })
 
   afterEach(() => {
@@ -29,7 +29,7 @@ describe('PosterImage', () => {
   })
 
   it('loads an eager poster and emits the loaded URL', async () => {
-    const getImage = vi.mocked(window.mediaServer.getImage)
+    const getImage = vi.mocked(window.jellyfin.getImage)
     getImage.mockResolvedValue('data:image/jpeg;base64,poster')
     const loaded = vi.fn()
     const wrapper = mount(PosterImage, { props: { item: item(), eager: true, onLoaded: loaded } })
@@ -46,7 +46,7 @@ describe('PosterImage', () => {
   })
 
   it('uses an explicit maximum width when provided', async () => {
-    const getImage = vi.mocked(window.mediaServer.getImage)
+    const getImage = vi.mocked(window.jellyfin.getImage)
     getImage.mockResolvedValue('data:image/jpeg;base64,wide')
     mount(PosterImage, { props: { item: item(), eager: true, maxWidth: 3840 } })
 
@@ -56,7 +56,7 @@ describe('PosterImage', () => {
   })
 
   it('falls back from a missing series poster to the season poster', async () => {
-    const getImage = vi.mocked(window.mediaServer.getImage)
+    const getImage = vi.mocked(window.jellyfin.getImage)
     getImage.mockImplementation(async (request) => {
       if (request.itemId === 'series-1') throw new Error('series poster unavailable')
       return `data:image/jpeg;base64,${request.itemId}`
@@ -79,7 +79,7 @@ describe('PosterImage', () => {
   })
 
   it('tries the next backdrop candidate when an earlier image fails', async () => {
-    const getImage = vi.mocked(window.mediaServer.getImage)
+    const getImage = vi.mocked(window.jellyfin.getImage)
     const season = item({ Id: 'season-1', Name: '第一季', Type: 'Season', BackdropImageTags: ['season-backdrop'] })
     const loaded = vi.fn()
     getImage.mockImplementation(async (request) => {
@@ -87,7 +87,7 @@ describe('PosterImage', () => {
       if (request.itemId === 'season-1') return 'data:image/jpeg;base64,season'
       return `data:image/jpeg;base64,${request.itemId}`
     })
-    const getItem = vi.mocked(window.mediaServer.getItem)
+    const getItem = vi.mocked(window.jellyfin.getItem)
     getItem.mockResolvedValue(season)
     const wrapper = mount(PosterImage, {
       props: {
@@ -107,7 +107,7 @@ describe('PosterImage', () => {
   })
 
   it('emits failed and renders a placeholder after all candidates fail', async () => {
-    const getImage = vi.mocked(window.mediaServer.getImage)
+    const getImage = vi.mocked(window.jellyfin.getImage)
     getImage.mockRejectedValue(new Error('missing'))
     const failed = vi.fn()
     const wrapper = mount(PosterImage, { props: { item: item(), eager: true, onFailed: failed } })
@@ -121,9 +121,9 @@ describe('PosterImage', () => {
   })
 
   it('falls back after a browser image error and tolerates missing ancestors', async () => {
-    const getImage = vi.mocked(window.mediaServer.getImage)
+    const getImage = vi.mocked(window.jellyfin.getImage)
     getImage.mockResolvedValueOnce('data:image/jpeg;base64,first').mockResolvedValueOnce('data:image/jpeg;base64,parent')
-    const getItem = vi.mocked(window.mediaServer.getItem)
+    const getItem = vi.mocked(window.jellyfin.getItem)
     getItem.mockRejectedValue(new Error('ancestor unavailable'))
     const wrapper = mount(PosterImage, {
       props: {
@@ -160,7 +160,7 @@ describe('PosterImage', () => {
       observe = vi.fn()
     }
     window.IntersectionObserver = FakeIntersectionObserver as unknown as typeof IntersectionObserver
-    const getImage = vi.mocked(window.mediaServer.getImage)
+    const getImage = vi.mocked(window.jellyfin.getImage)
     getImage.mockResolvedValue('data:image/jpeg;base64,lazy')
     const wrapper = mount(PosterImage, { props: { item: item() } })
 
@@ -198,7 +198,7 @@ describe('PosterImage', () => {
       observe = observe
     }
     window.IntersectionObserver = FakeIntersectionObserver as unknown as typeof IntersectionObserver
-    const getImage = vi.mocked(window.mediaServer.getImage)
+    const getImage = vi.mocked(window.jellyfin.getImage)
     getImage.mockResolvedValue('data:image/jpeg;base64,refreshed')
     const wrapper = mount(PosterImage, { props: { item: item(), eager: false } })
 
@@ -214,7 +214,7 @@ describe('PosterImage', () => {
   it('ignores a stale image result after the item changes', async () => {
     let resolveFirst!: (value: string) => void
     const firstResult = new Promise<string>((resolve) => { resolveFirst = resolve })
-    const getImage = vi.mocked(window.mediaServer.getImage)
+    const getImage = vi.mocked(window.jellyfin.getImage)
     getImage.mockReturnValueOnce(firstResult).mockResolvedValueOnce('data:image/jpeg;base64,new')
     const wrapper = mount(PosterImage, { props: { item: item({ Id: 'old-item' }), eager: true } })
 
@@ -225,5 +225,21 @@ describe('PosterImage', () => {
 
     expect(wrapper.get('img').attributes('src')).toBe('data:image/jpeg;base64,new')
     expect(getImage.mock.calls.map(([request]) => request.itemId)).toEqual(['old-item', 'new-item'])
+  })
+
+  it('retains the previous image while a hero replacement is loading', async () => {
+    let resolveNext!: (value: string) => void
+    const next = new Promise<string>((resolve) => { resolveNext = resolve })
+    const getImage = vi.mocked(window.jellyfin.getImage)
+    getImage.mockResolvedValueOnce('data:image/jpeg;base64,old').mockReturnValueOnce(next)
+    const wrapper = mount(PosterImage, { props: { item: item({ Id: 'old-item' }), eager: true, retainOnFailure: true } })
+    await flushPromises()
+    expect(wrapper.get('img').attributes('src')).toBe('data:image/jpeg;base64,old')
+    await wrapper.setProps({ item: item({ Id: 'new-item' }) })
+    await flushPromises()
+    expect(wrapper.get('img').attributes('src')).toBe('data:image/jpeg;base64,old')
+    resolveNext('data:image/jpeg;base64,new')
+    await flushPromises()
+    expect(wrapper.get('img').attributes('src')).toBe('data:image/jpeg;base64,new')
   })
 })
