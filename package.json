@@ -1,6 +1,6 @@
 {
   "name": "jellyfin-mpv-player",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "A Jellyfin desktop client powered by MPV.",
   "productName": "Jellyfin MPV Player",
   "main": "dist-electron/electron/main.js",
