@@ -286,7 +286,11 @@ async function buildQueue(client: JellyfinClient, itemId: string): Promise<{ ite
 }
 
 function chooseAudio(streams: MediaStream[], preference?: AudioPreference): number | undefined {
-  if (preference?.index !== undefined && streams.some((stream) => stream.Type === 'Audio' && stream.Index === preference.index)) return preference.index
+  if (preference?.index !== undefined) {
+    return streams.some((stream) => stream.Type === 'Audio' && stream.Index === preference.index)
+      ? preference.index
+      : undefined
+  }
   const language = preference?.language?.toLowerCase()
   const title = preference?.title?.toLowerCase()
   return streams.find((stream) => stream.Type === 'Audio' && language && (stream.Language || stream.DisplayLanguage || '').toLowerCase() === language)?.Index
@@ -297,7 +301,11 @@ function chooseAudio(streams: MediaStream[], preference?: AudioPreference): numb
 
 function chooseSubtitle(streams: MediaStream[], preference?: SubtitlePreference): number | undefined {
   if (preference?.disabled) return undefined
-  if (preference?.index !== undefined && streams.some((stream) => stream.Type === 'Subtitle' && stream.Index === preference.index)) return preference.index
+  if (preference?.index !== undefined) {
+    return streams.some((stream) => stream.Type === 'Subtitle' && stream.Index === preference.index)
+      ? preference.index
+      : undefined
+  }
   return chooseDefaultSubtitle(streams)
 }
 
@@ -322,6 +330,12 @@ async function prepareEntry(session: PlaybackSession, item: MediaItem, startTime
   const streams = (source.MediaStreams || item.MediaStreams || []) as MediaStream[]
   const audioStreamIndex = chooseAudio(streams, session.audioPreference)
   const subtitleStreamIndex = chooseSubtitle(streams, session.subtitlePreference)
+  if (session.audioPreference?.index !== undefined && audioStreamIndex === undefined) {
+    throw new Error(`《${item.Name}》未找到用户指定的音轨 ${session.audioPreference.index}`)
+  }
+  if (!session.subtitlePreference?.disabled && session.subtitlePreference?.index !== undefined && subtitleStreamIndex === undefined) {
+    throw new Error(`《${item.Name}》未找到用户指定的字幕轨道 ${session.subtitlePreference.index}`)
+  }
   const subtitle = subtitleStreamIndex === undefined ? undefined : streams.find((stream) => stream.Type === 'Subtitle' && stream.Index === subtitleStreamIndex)
   return {
     ...queueItem(item),
@@ -573,7 +587,11 @@ async function activateLoadedEntry(session: PlaybackSession, entry: PlaybackEntr
     const track = Array.isArray(tracks)
       ? (tracks as Array<{ type?: unknown; id?: unknown; 'ff-index'?: unknown }>).find((candidate) => candidate.type === 'audio' && candidate['ff-index'] === entry.audioStreamIndex)
       : undefined
-    if (track && typeof track.id === 'number') await session.ipc.setProperty('aid', track.id)
+    if (!track || typeof track.id !== 'number') {
+      if (session.audioPreference?.index !== undefined) throw new Error(`《${entry.name}》未能映射音轨 ${entry.audioStreamIndex}`)
+    } else {
+      await session.ipc.setProperty('aid', track.id)
+    }
   }
   entry.isPaused = false
   await session.ipc.setProperty('pause', false)
