@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { contextualItemLabel, itemTypeLabel, mediaPresentation } from './mediaPresentation'
-import type { EmbyItem } from './types'
+import type { MediaItem } from './types'
 
-function item(overrides: Partial<EmbyItem>): EmbyItem {
+function item(overrides: Partial<MediaItem>): MediaItem {
   return { Id: 'item-1', Name: '默认名称', Type: 'Movie', ...overrides }
 }
 

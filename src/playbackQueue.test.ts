@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { buildEpisodeQueue, compareEpisodes } from './playbackQueue'
-import type { EmbyItem } from './types'
+import type { MediaItem } from './types'
 
-function episode(id: string, season: number, number: number): EmbyItem {
+function episode(id: string, season: number, number: number): MediaItem {
   return { Id: id, Name: id, Type: 'Episode', ParentIndexNumber: season, IndexNumber: number }
 }
 

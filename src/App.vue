@@ -38,8 +38,8 @@ import releaseNotesData from './data/release-notes.json'
 import { contextualItemLabel, itemTypeLabel, mediaPresentation } from './mediaPresentation'
 import { chooseDefaultSubtitle, isExternalSubtitle, isChineseSubtitle } from './subtitlePreference'
 import type {
-  EmbyItem,
-  EmbyView,
+  MediaItem,
+  MediaView,
   MediaStream,
   PlaybackInfo,
   PlaybackEvent,
@@ -63,24 +63,24 @@ const isFullScreen = ref(false)
 const isContentScrolled = ref(false)
 const activePage = ref<Page>('home')
 const activeFilter = ref<LibraryFilter>('all')
-const views = ref<EmbyView[]>([])
+const views = ref<MediaView[]>([])
 const activeViewId = ref('')
-const libraryItems = ref<EmbyItem[]>([])
-const homeAllItems = ref<EmbyItem[]>([])
-const homeMovieItems = ref<EmbyItem[]>([])
-const homeShowItems = ref<EmbyItem[]>([])
-const latestItems = ref<EmbyItem[]>([])
-const recommendationItems = ref<EmbyItem[]>([])
-const continueItems = ref<EmbyItem[]>([])
-const nextUpItems = ref<EmbyItem[]>([])
-const searchResults = ref<EmbyItem[]>([])
+const libraryItems = ref<MediaItem[]>([])
+const homeAllItems = ref<MediaItem[]>([])
+const homeMovieItems = ref<MediaItem[]>([])
+const homeShowItems = ref<MediaItem[]>([])
+const latestItems = ref<MediaItem[]>([])
+const recommendationItems = ref<MediaItem[]>([])
+const continueItems = ref<MediaItem[]>([])
+const nextUpItems = ref<MediaItem[]>([])
+const searchResults = ref<MediaItem[]>([])
 const searchTerm = ref('')
 const searchLoading = ref(false)
 const searchError = ref('')
-const selectedItem = ref<EmbyItem | null>(null)
+const selectedItem = ref<MediaItem | null>(null)
 const playbackInfo = ref<PlaybackInfo | null>(null)
-const seasonItems = ref<EmbyItem[]>([])
-const episodeItems = ref<EmbyItem[]>([])
+const seasonItems = ref<MediaItem[]>([])
+const episodeItems = ref<MediaItem[]>([])
 const selectedAudio = ref<number | undefined>()
 const selectedSubtitle = ref<number | null>(null)
 const isLoading = ref(false)
@@ -119,13 +119,20 @@ const form = reactive({
 })
 
 const isConnected = computed(() => Boolean(settings.value?.connected))
+const serverLabel = computed(() => settings.value?.connected && settings.value.serverKind === 'emby' ? 'Emby' : 'Jellyfin')
+const serverDescriptor = computed(() => {
+  if (!settings.value?.connected) return 'Jellyfin 优先，兼容 Emby'
+  const name = settings.value.serverName || serverLabel.value
+  const version = settings.value.serverVersion && settings.value.serverVersion !== 'legacy' ? ` ${settings.value.serverVersion}` : ''
+  return `${name}${version}`
+})
 const activeView = computed(() => views.value.find((view) => view.Id === activeViewId.value) || views.value[0])
 const heroItems = computed(() => recommendationItems.value.length ? recommendationItems.value : latestItems.value.slice(0, 8))
 const heroIndex = ref(0)
 const heroItem = computed(() => heroItems.value[heroIndex.value] || heroItems.value[0])
 const isImmersiveHome = computed(() => activePage.value === 'home' && Boolean(heroItem.value))
-const heroDisplayedItem = ref<EmbyItem>()
-const heroOutgoingItem = ref<EmbyItem>()
+const heroDisplayedItem = ref<MediaItem>()
+const heroOutgoingItem = ref<MediaItem>()
 const heroLoadedId = ref('')
 const heroLabel = computed(() => recommendationItems.value.length ? '电影推荐' : '最近加入')
 const displayItems = computed(() => {
@@ -199,7 +206,7 @@ function applySettings(next: PublicSettings): void {
   form.mpvPath = next.mpvPath || 'mpv.exe'
 }
 
-function viewSupportsFilter(view: EmbyView, filter: LibraryFilter): boolean {
+function viewSupportsFilter(view: MediaView, filter: LibraryFilter): boolean {
   if (filter === 'all' || !view.CollectionType) return true
   const collectionType = view.CollectionType.toLowerCase()
   if (collectionType === 'mixed') return true
@@ -212,13 +219,13 @@ function preferredViewId(filter: LibraryFilter): string {
   return views.value.find((view) => viewSupportsFilter(view, filter))?.Id || views.value[0]?.Id || ''
 }
 
-async function loadAllItems(options: ItemsQuery): Promise<EmbyItem[]> {
-  const items: EmbyItem[] = []
+async function loadAllItems(options: ItemsQuery): Promise<MediaItem[]> {
+  const items: MediaItem[] = []
   let startIndex = 0
   let totalRecordCount = Number.POSITIVE_INFINITY
   let pageCount = 0
   while (startIndex < totalRecordCount && pageCount < 200) {
-    const result = await window.emby.getItems({ ...options, startIndex, limit: 100 })
+    const result = await window.mediaServer.getItems({ ...options, startIndex, limit: 100 })
     items.push(...result.Items)
     totalRecordCount = result.TotalRecordCount
     if (!result.Items.length) break
@@ -228,7 +235,7 @@ async function loadAllItems(options: ItemsQuery): Promise<EmbyItem[]> {
   return items
 }
 
-function uniqueItems(items: EmbyItem[]): EmbyItem[] {
+function uniqueItems(items: MediaItem[]): MediaItem[] {
   return [...new Map(items.map((item) => [item.Id, item])).values()]
 }
 
@@ -310,7 +317,7 @@ async function loadHome(): Promise<void> {
   homeLoading.value = true
   homeError.value = ''
   try {
-    const nextViews = await window.emby.getViews()
+    const nextViews = await window.mediaServer.getViews()
     if (requestId !== homeRequestId) return
     views.value = nextViews
     if (!views.value.some((view) => view.Id === activeViewId.value)) {
@@ -318,11 +325,11 @@ async function loadHome(): Promise<void> {
     }
     recommendationError.value = ''
     const [recommendations, latest, continued, nextUp, allItems] = await Promise.all([
-      window.emby.getMovieRecommendations().catch((error: unknown) => {
+      window.mediaServer.getMovieRecommendations().catch((error: unknown) => {
         recommendationError.value = error instanceof Error ? error.message : '读取电影推荐失败'
         return []
       }),
-      window.emby.getItems({
+      window.mediaServer.getItems({
         recursive: true,
         includeItemTypes: 'Movie,Series',
         sortBy: 'DateCreated',
@@ -336,7 +343,7 @@ async function loadHome(): Promise<void> {
         sortBy: 'DatePlayed',
         sortOrder: 'Descending',
       }),
-      window.emby.getNextUp().catch(() => ({ Items: [], TotalRecordCount: 0 })),
+      window.mediaServer.getNextUp().catch(() => ({ Items: [], TotalRecordCount: 0 })),
       loadAllItems({
         recursive: true,
         includeItemTypes: 'Movie,Series',
@@ -359,7 +366,7 @@ async function loadHome(): Promise<void> {
     startHeroAutoPlay()
   } catch (error) {
     if (requestId === homeRequestId) {
-      homeError.value = error instanceof Error ? error.message : '加载 Emby 内容失败'
+      homeError.value = error instanceof Error ? error.message : `加载 ${serverLabel.value} 内容失败`
     }
   } finally {
     if (requestId === homeRequestId) homeLoading.value = false
@@ -377,7 +384,7 @@ async function refreshContinueItems(): Promise<void> {
       sortOrder: 'Descending',
     })
     continueItems.value = uniqueItems(continued)
-    const nextUp = await window.emby.getNextUp().catch(() => ({ Items: [], TotalRecordCount: 0 }))
+    const nextUp = await window.mediaServer.getNextUp().catch(() => ({ Items: [], TotalRecordCount: 0 }))
     nextUpItems.value = uniqueItems(nextUp.Items || []).slice(0, 24)
   } catch (error) {
     showNotice(error instanceof Error ? `继续观看刷新失败：${error.message}` : '继续观看刷新失败', 'error')
@@ -392,12 +399,12 @@ async function loadLibrary(viewId = activeViewId.value, filter = activeFilter.va
   libraryLoading.value = true
   libraryError.value = ''
   try {
-    const items: EmbyItem[] = []
+    const items: MediaItem[] = []
     let startIndex = 0
     let totalRecordCount = Number.POSITIVE_INFINITY
     let pageCount = 0
     while (startIndex < totalRecordCount && pageCount < 200) {
-      const result = await window.emby.getItems({
+      const result = await window.mediaServer.getItems({
         parentId: resolvedViewId || undefined,
         recursive: true,
         includeItemTypes: filter === 'all' ? 'Movie,Series' : filter,
@@ -445,7 +452,7 @@ async function submitConnection(): Promise<void> {
   errorMessage.value = ''
   if (isConnected.value && !form.password.trim()) {
     try {
-      applySettings(await window.emby.saveSettings({
+      applySettings(await window.mediaServer.saveSettings({
         serverUrl: form.serverUrl,
         username: form.username,
         mpvPath: form.mpvPath,
@@ -456,13 +463,13 @@ async function submitConnection(): Promise<void> {
     }
     return
   }
-  if (!form.serverUrl.trim() || !form.username.trim() || !form.password.trim()) {
-    errorMessage.value = '服务器地址、用户名和密码不能为空'
+  if (!form.serverUrl.trim() || !form.username.trim()) {
+    errorMessage.value = '服务器地址和用户名不能为空'
     return
   }
   isLoading.value = true
   try {
-    const result = await window.emby.login({
+    const result = await window.mediaServer.login({
       serverUrl: form.serverUrl,
       username: form.username,
       password: form.password,
@@ -471,10 +478,10 @@ async function submitConnection(): Promise<void> {
     applySettings(result.settings)
     form.password = ''
     activePage.value = 'home'
-    showNotice(`已连接到 Emby，欢迎回来，${result.user.Name}`)
+    showNotice(`已连接到 ${result.settings.serverKind === 'emby' ? 'Emby' : 'Jellyfin'}，欢迎回来，${result.user.Name}`)
     await loadHome()
   } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : '连接 Emby 失败'
+    errorMessage.value = error instanceof Error ? error.message : `连接 ${serverLabel.value} 失败`
   } finally {
     isLoading.value = false
   }
@@ -482,7 +489,8 @@ async function submitConnection(): Promise<void> {
 
 async function disconnect(): Promise<void> {
   try {
-    applySettings(await window.emby.logout())
+    const previousServerLabel = serverLabel.value
+    applySettings(await window.mediaServer.logout())
     views.value = []
     libraryItems.value = []
     homeAllItems.value = []
@@ -494,7 +502,7 @@ async function disconnect(): Promise<void> {
     nextUpItems.value = []
     stopHeroAutoPlay()
     activePage.value = 'settings'
-    showNotice('已断开 Emby 连接')
+    showNotice(`已断开 ${previousServerLabel} 连接`)
   } catch (error) {
     showNotice(error instanceof Error ? error.message : '断开连接失败', 'error')
   }
@@ -503,8 +511,8 @@ async function disconnect(): Promise<void> {
 async function validateMpv(test = false): Promise<void> {
   try {
     mpvValidation.value = test
-      ? await window.emby.testMpvPath(form.mpvPath)
-      : await window.emby.validateMpvPath(form.mpvPath)
+      ? await window.mediaServer.testMpvPath(form.mpvPath)
+      : await window.mediaServer.validateMpvPath(form.mpvPath)
     showNotice(mpvValidation.value.message, mpvValidation.value.valid ? 'success' : 'error')
   } catch (error) {
     mpvValidation.value = { valid: false, path: form.mpvPath, message: error instanceof Error ? error.message : 'MPV 检测失败' }
@@ -514,7 +522,7 @@ async function validateMpv(test = false): Promise<void> {
 
 async function openLogDirectory(): Promise<void> {
   try {
-    await window.emby.openLogDirectory()
+    await window.mediaServer.openLogDirectory()
     showNotice('日志目录已打开')
   } catch (error) {
     showNotice(error instanceof Error ? error.message : '无法打开日志目录', 'error')
@@ -533,7 +541,7 @@ async function performSearch(): Promise<void> {
   searchLoading.value = true
   searchError.value = ''
   try {
-    const result = await window.emby.getItems({
+    const result = await window.mediaServer.getItems({
       searchTerm: term,
       recursive: true,
       includeItemTypes: 'Movie,Series,Episode',
@@ -554,7 +562,7 @@ function focusSearch(): void {
 
 async function setFullScreen(enabled: boolean): Promise<void> {
   try {
-    isFullScreen.value = await window.emby.setFullScreen(enabled)
+    isFullScreen.value = await window.mediaServer.setFullScreen(enabled)
   } catch (error) {
     showNotice(error instanceof Error ? error.message : '切换全屏失败', 'error')
   }
@@ -590,10 +598,10 @@ watch(searchTerm, () => {
   searchTimer = setTimeout(() => void performSearch(), 360)
 })
 
-async function loadPlayableDetails(item: EmbyItem): Promise<void> {
+async function loadPlayableDetails(item: MediaItem): Promise<void> {
   isDetailLoading.value = true
   try {
-    playbackInfo.value = await window.emby.getPlaybackInfo(item.Id)
+    playbackInfo.value = await window.mediaServer.getPlaybackInfo(item.Id)
     const streams = (playbackInfo.value.MediaSources?.[0]?.MediaStreams || item.MediaStreams || []) as MediaStream[]
     selectedAudio.value = streams.find((stream) => stream.Type === 'Audio' && stream.IsDefault)?.Index
       ?? streams.find((stream) => stream.Type === 'Audio')?.Index
@@ -605,7 +613,7 @@ async function loadPlayableDetails(item: EmbyItem): Promise<void> {
   }
 }
 
-async function openDetails(item: EmbyItem): Promise<void> {
+async function openDetails(item: MediaItem): Promise<void> {
   const requestId = ++detailRequestId
   selectedItem.value = item
   playbackInfo.value = null
@@ -615,11 +623,11 @@ async function openDetails(item: EmbyItem): Promise<void> {
   selectedSubtitle.value = null
   isDetailLoading.value = true
   try {
-    const detailed = await window.emby.getItem(item.Id)
+    const detailed = await window.mediaServer.getItem(item.Id)
     if (requestId !== detailRequestId) return
     selectedItem.value = detailed
     if (detailed.Type === 'Series') {
-      const seasons = await window.emby.getItems({
+      const seasons = await window.mediaServer.getItems({
         parentId: detailed.Id,
         recursive: false,
         includeItemTypes: 'Season',
@@ -629,7 +637,7 @@ async function openDetails(item: EmbyItem): Promise<void> {
       if (requestId !== detailRequestId) return
       seasonItems.value = seasons.Items
     } else if (detailed.Type === 'Season') {
-      const episodes = await window.emby.getItems({
+      const episodes = await window.mediaServer.getItems({
         parentId: detailed.Id,
         recursive: false,
         includeItemTypes: 'Episode',
@@ -656,7 +664,7 @@ function closeDetails(): void {
   episodeItems.value = []
 }
 
-function resumePosition(item: EmbyItem): number {
+function resumePosition(item: MediaItem): number {
   const position = item.UserData?.PlaybackPositionTicks || 0
   if (item.UserData?.Played) return 0
   return position
@@ -666,7 +674,7 @@ async function playSelected(): Promise<void> {
   const item = selectedItem.value
   if (!item || (item.Type !== 'Movie' && item.Type !== 'Episode')) return
   try {
-    const snapshot = await window.emby.playbackStart({
+    const snapshot = await window.mediaServer.playbackStart({
       itemId: item.Id,
       mediaSourceId: selectedSource.value?.Id,
       audioPreference: { index: selectedAudio.value },
@@ -682,9 +690,9 @@ async function playSelected(): Promise<void> {
   }
 }
 
-async function playItemDirect(item: EmbyItem): Promise<void> {
+async function playItemDirect(item: MediaItem): Promise<void> {
   try {
-    const snapshot = await window.emby.playbackStart({
+    const snapshot = await window.mediaServer.playbackStart({
       itemId: item.Id,
     })
     handlePlaybackSnapshot(snapshot)
@@ -698,7 +706,7 @@ async function stopPlayback(): Promise<void> {
   const sessionId = playbackSnapshot.value.sessionId
   if (!sessionId) return
   try {
-    handlePlaybackSnapshot(await window.emby.playbackCommand({ sessionId, command: 'stop' }))
+    handlePlaybackSnapshot(await window.mediaServer.playbackCommand({ sessionId, command: 'stop' }))
   } catch (error) {
     showNotice(error instanceof Error ? error.message : '停止播放失败', 'error')
   }
@@ -722,13 +730,13 @@ function handlePlaybackSnapshot(snapshot: PlaybackSnapshot): void {
 async function refreshPlaybackData(snapshot: PlaybackSnapshot, notifyOnFailure = true): Promise<void> {
   const itemId = snapshot.currentItemId || snapshot.queue[snapshot.currentIndex]?.itemId
   if (!itemId || !isConnected.value) return
-  let lastItem: EmbyItem | undefined
+  let lastItem: MediaItem | undefined
   let confirmed = false
   for (const delay of [0, 400, 1200]) {
     if (delay) await new Promise((resolve) => setTimeout(resolve, delay))
     try {
-      lastItem = await window.emby.getItem(itemId)
-      const update = (items: EmbyItem[]) => items.map((item) => item.Id === lastItem?.Id ? { ...item, ...lastItem } : item)
+      lastItem = await window.mediaServer.getItem(itemId)
+      const update = (items: MediaItem[]) => items.map((item) => item.Id === lastItem?.Id ? { ...item, ...lastItem } : item)
       libraryItems.value = update(libraryItems.value)
       homeAllItems.value = update(homeAllItems.value)
       homeMovieItems.value = update(homeMovieItems.value)
@@ -761,14 +769,14 @@ async function togglePlaybackPause(): Promise<void> {
   const sessionId = playbackSnapshot.value.sessionId
   if (!sessionId) return
   const command = playbackSnapshot.value.phase === 'paused' ? 'resume' : 'pause'
-  handlePlaybackSnapshot(await window.emby.playbackCommand({ sessionId, command }))
+  handlePlaybackSnapshot(await window.mediaServer.playbackCommand({ sessionId, command }))
 }
 
 async function sendPlaybackCommand(command: 'previous' | 'next' | 'stop-after-current'): Promise<void> {
   const sessionId = playbackSnapshot.value.sessionId
   if (!sessionId) return
   try {
-    handlePlaybackSnapshot(await window.emby.playbackCommand({ sessionId, command }))
+    handlePlaybackSnapshot(await window.mediaServer.playbackCommand({ sessionId, command }))
   } catch (error) {
     showNotice(error instanceof Error ? error.message : '播放控制失败', 'error')
   }
@@ -778,7 +786,7 @@ async function retryPlayback(): Promise<void> {
   const itemId = playbackSnapshot.value.currentItemId || playbackSnapshot.value.queue[playbackSnapshot.value.currentIndex]?.itemId
   if (!itemId) return
   try {
-    const snapshot = await window.emby.playbackStart({
+    const snapshot = await window.mediaServer.playbackStart({
       itemId,
       startTimeTicks: playbackSnapshot.value.positionTicks,
     })
@@ -791,14 +799,14 @@ async function retryPlayback(): Promise<void> {
 function handleWindowFocus(): void {
   if (focusRefreshTimer) clearTimeout(focusRefreshTimer)
   focusRefreshTimer = setTimeout(async () => {
-    const snapshot = await window.emby.getPlaybackSnapshot()
+    const snapshot = await window.mediaServer.getPlaybackSnapshot()
     if (snapshot.revision > playbackSnapshot.value.revision) handlePlaybackChanged({ ...snapshot, type: 'snapshot' })
   }, 80)
 }
 
 onMounted(async () => {
   window.addEventListener('keydown', handleKeydown)
-  if (!window.emby) {
+  if (!window.mediaServer) {
     errorMessage.value = '请通过 Ember Player 桌面应用启动此页面'
     activePage.value = 'settings'
     appBooted.value = true
@@ -806,15 +814,15 @@ onMounted(async () => {
   }
   window.addEventListener('focus', handleWindowFocus)
   try {
-    removeFullScreenListener = window.emby.onFullScreenChanged((enabled) => {
+    removeFullScreenListener = window.mediaServer.onFullScreenChanged((enabled) => {
       isFullScreen.value = enabled
     })
-    isFullScreen.value = await window.emby.getFullScreen()
-    const saved = await window.emby.getSettings()
+    isFullScreen.value = await window.mediaServer.getFullScreen()
+    const saved = await window.mediaServer.getSettings()
     applySettings(saved)
     appBooted.value = true
-    removePlaybackListener = window.emby.onPlaybackChanged(handlePlaybackChanged)
-    handlePlaybackSnapshot(await window.emby.getPlaybackSnapshot())
+    removePlaybackListener = window.mediaServer.onPlaybackChanged(handlePlaybackChanged)
+    handlePlaybackSnapshot(await window.mediaServer.getPlaybackSnapshot())
     if (saved.connected) {
       await loadHome()
     } else {
@@ -907,25 +915,26 @@ onUnmounted(() => {
           </div>
           <p class="eyebrow">YOUR PERSONAL CINEMA</p>
           <h1>把你的片库，<br /><em>交给更好的播放器。</em></h1>
-          <p class="intro-copy">连接 Emby，浏览完整媒体库，并用 MPV 播放每一个你真正想看的画面。</p>
+          <p class="intro-copy">连接 Jellyfin，浏览完整媒体库，并用 MPV 播放每一个你真正想看的画面。也兼容 Emby。</p>
         </div>
 
         <div class="settings-layout">
           <div class="settings-heading">
             <p class="eyebrow">CONNECTION</p>
-            <h2>{{ isConnected ? '连接设置' : '连接你的 Emby' }}</h2>
-            <p>填写 Emby 服务地址和账号，应用会在本机保存加密的登录令牌。</p>
+            <h2>{{ isConnected ? '连接设置' : '连接你的 Jellyfin' }}</h2>
+            <p>填写 Jellyfin 服务地址和账号，应用会在本机保存加密的登录令牌；Emby 服务器也可以直接连接。</p>
+            <p v-if="isConnected" class="server-identity">当前服务：{{ serverDescriptor }}</p>
           </div>
           <form class="settings-form" @submit.prevent="submitConnection">
-            <label class="field-label" for="server-url">Emby 服务器地址</label>
+            <label class="field-label" for="server-url">{{ serverLabel }} 服务器地址</label>
             <input id="server-url" v-model="form.serverUrl" class="text-input" type="text" placeholder="http://192.168.1.100:8096" autocomplete="url" />
-            <p class="field-hint">填写你在浏览器中访问 Emby 的服务根地址，例如 http://192.168.1.100:8096</p>
+            <p class="field-hint">填写你在浏览器中访问 {{ serverLabel }} 的服务根地址，例如 http://192.168.1.100:8096；如果配置了 Base URL，请一并保留。</p>
 
             <label class="field-label" for="username">用户名</label>
             <input id="username" v-model="form.username" class="text-input" type="text" autocomplete="username" />
 
             <label class="field-label" for="password">密码</label>
-            <input id="password" v-model="form.password" class="text-input" type="password" :placeholder="isConnected ? '留空以保留当前连接' : '输入 Emby 密码'" autocomplete="current-password" />
+            <input id="password" v-model="form.password" class="text-input" type="password" :placeholder="isConnected ? '留空以保留当前连接' : '无密码账号可留空'" autocomplete="current-password" />
 
             <label class="field-label" for="mpv-path">MPV 路径</label>
             <input id="mpv-path" v-model="form.mpvPath" class="text-input" type="text" placeholder="mpv.exe 或 C:\\Apps\\mpv\\mpv.exe" />
@@ -945,7 +954,7 @@ onUnmounted(() => {
                 <LoaderCircle v-if="isLoading" class="spin" :size="17" />
                 <Check v-else-if="isConnected && !form.password" :size="17" />
                 <LogIn v-else :size="17" />
-                {{ isConnected && !form.password ? '保存设置' : '连接 Emby' }}
+                {{ isConnected && !form.password ? '保存设置' : '连接 ' + serverLabel }}
               </button>
             </div>
           </form>
@@ -1069,7 +1078,7 @@ onUnmounted(() => {
         <div class="home-feed" :class="{ 'home-feed--immersive': isImmersiveHome }">
           <div v-if="homeError" class="error-banner"><AlertCircle :size="18" />{{ homeError }}<button class="text-button" type="button" @click="loadHome">重试</button></div>
           <div v-if="homeLoading && !heroItem" class="loading-state"><LoaderCircle class="spin" :size="24" />正在加载媒体库</div>
-          <div v-else-if="!homeLoading && !homeError && !heroItem" class="empty-state home-empty-state"><Clapperboard :size="32" /><h3>还没有可展示的内容</h3><p>请确认 Emby 媒体库已完成扫描，并检查当前账号权限。</p><button class="button button--ghost" type="button" @click="loadHome"><RefreshCw :size="16" />重新加载</button></div>
+          <div v-else-if="!homeLoading && !homeError && !heroItem" class="empty-state home-empty-state"><Clapperboard :size="32" /><h3>还没有可展示的内容</h3><p>请确认 {{ serverLabel }} 媒体库已完成扫描，并检查当前账号权限。</p><button class="button button--ghost" type="button" @click="loadHome"><RefreshCw :size="16" />重新加载</button></div>
 
           <MediaRail v-if="continueItems.length" title="继续观看" :items="continueItems" poster-mode="series" @select="openDetails" />
           <MediaRail v-if="nextUpItems.length" title="下一集" :items="nextUpItems" poster-mode="series" @select="openDetails" />

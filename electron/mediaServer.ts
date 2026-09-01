@@ -2,20 +2,24 @@ import { Buffer } from 'node:buffer'
 import packageInfo from '../package.json'
 import { logger } from './logger'
 import type {
-  EmbyItem,
-  EmbyView,
+  MediaItem,
+  MediaView,
   ItemResult,
   MediaSourceInfo,
   PlaybackInfo,
   PlaybackReportPayload,
   QueryResult,
   RecommendationDto,
+  MediaServerIdentity,
+  MediaServerKind,
 } from '../src/types'
 
 export type { MediaSourceInfo, PlaybackInfo } from '../src/types'
 
 const CLIENT_HEADER = `MediaBrowser Client="Ember Player", Device="Windows", Version="${packageInfo.version}"`
 const REQUEST_TIMEOUT_MS = 15_000
+const CLIENT_NAME = 'Ember Player'
+const DEVICE_NAME = 'Windows'
 
 export interface AuthResponse {
   AccessToken: string
@@ -25,13 +29,54 @@ export interface AuthResponse {
   }
 }
 
+interface PublicSystemInfo {
+  ProductName?: string | null
+  ServerName?: string | null
+  Version?: string | null
+}
+
+export function mediaServerLabel(kind?: MediaServerKind): string {
+  return kind === 'jellyfin' ? 'Jellyfin' : kind === 'emby' ? 'Emby' : '媒体服务器'
+}
+
+export function buildMediaServerAuthorization(kind: MediaServerKind, token: string, deviceId = 'ember-player'): string {
+  const clientHeader = `MediaBrowser Client=\"${encodeURIComponent(CLIENT_NAME)}\", Device=\"${encodeURIComponent(DEVICE_NAME)}\", DeviceId=\"${encodeURIComponent(deviceId)}\", Version=\"${encodeURIComponent(packageInfo.version)}\"`
+  return kind === 'jellyfin' && token ? `${clientHeader}, Token=\"${encodeURIComponent(token)}\"` : clientHeader
+}
+
+function parseVersion(version: string): [number, number] | undefined {
+  const match = version.trim().match(/^(\d+)\.(\d+)/)
+  if (!match) return undefined
+  return [Number(match[1]), Number(match[2])]
+}
+
+export function identifyMediaServer(info: PublicSystemInfo): MediaServerIdentity {
+  const productName = typeof info.ProductName === 'string' ? info.ProductName.trim() : ''
+  const version = typeof info.Version === 'string' ? info.Version.trim() : ''
+  if (!version) throw new Error('媒体服务器未返回有效版本号')
+
+  if (/jellyfin/i.test(productName)) {
+    const parsed = parseVersion(version)
+    if (!parsed || parsed[0] !== 10 || parsed[1] !== 11) {
+      throw new Error(`当前 Jellyfin 版本为 ${version}，Ember Player 0.9.0 需要 Jellyfin 10.11.x`)
+    }
+    return { kind: 'jellyfin', name: info.ServerName?.trim() || 'Jellyfin Server', version }
+  }
+
+  if (/emby/i.test(productName) || (!productName && parseVersion(version)?.[0] === 4)) {
+    return { kind: 'emby', name: info.ServerName?.trim() || 'Emby Server', version }
+  }
+
+  throw new Error(`无法识别媒体服务器（${productName || '未知产品'} ${version}）`)
+}
+
 function parseQueryResult<T>(value: unknown, endpoint: string): QueryResult<T> {
   if (!value || typeof value !== 'object') {
-    throw new Error(`Emby 接口 ${endpoint} 返回格式无效`)
+    throw new Error(`媒体服务器接口 ${endpoint} 返回格式无效`)
   }
   const result = value as Partial<QueryResult<T>>
   if (!Array.isArray(result.Items) || typeof result.TotalRecordCount !== 'number') {
-    throw new Error(`Emby 接口 ${endpoint} 缺少 Items 或 TotalRecordCount`)
+    throw new Error(`媒体服务器接口 ${endpoint} 缺少 Items 或 TotalRecordCount`)
   }
   return {
     Items: result.Items,
@@ -43,57 +88,83 @@ function parseQueryResult<T>(value: unknown, endpoint: string): QueryResult<T> {
 export function normalizeServerUrl(rawUrl: string): string {
   let value = rawUrl.trim()
   if (!value) {
-    throw new Error('请输入 Emby 服务器地址')
+    throw new Error('请输入 Jellyfin 或 Emby 服务器地址')
   }
   if (!/^https?:\/\//i.test(value)) {
+    if (/^[a-z][a-z\d+.-]*:\/\//i.test(value)) throw new Error('服务器地址仅支持 HTTP 或 HTTPS')
     value = `http://${value}`
   }
 
   const parsed = new URL(value)
+  if (parsed.username || parsed.password) {
+    throw new Error('服务器地址不能包含用户名或密码')
+  }
   let pathname = parsed.pathname.replace(/\/+$/, '')
   pathname = pathname.replace(/\/web(?:\/.*)?$/i, '')
-  if (!pathname) {
-    pathname = '/emby'
-  }
+  if (!pathname) pathname = '/'
   parsed.pathname = pathname
   parsed.search = ''
   parsed.hash = ''
   return parsed.toString().replace(/\/$/, '')
 }
 
-export class EmbyClient {
+export class MediaServerClient {
   readonly baseUrl: string
   readonly token: string
   readonly userId: string
   readonly deviceId: string
+  readonly identity: MediaServerIdentity
 
-  constructor(baseUrl: string, token: string, userId: string, deviceId = 'ember-player') {
+  constructor(baseUrl: string, token: string, userId: string, identity: MediaServerIdentity, deviceId = 'ember-player') {
     this.baseUrl = normalizeServerUrl(baseUrl)
     this.token = token
     this.userId = userId
+    this.identity = identity
     this.deviceId = deviceId
   }
 
-  static async authenticate(baseUrl: string, username: string, password: string): Promise<AuthResponse> {
-    const client = new EmbyClient(normalizeServerUrl(baseUrl), '', '')
-    return client.request<AuthResponse>('/Users/AuthenticateByName', {
+  static async inspect(baseUrl: string): Promise<{ baseUrl: string; identity: MediaServerIdentity }> {
+    const normalizedUrl = normalizeServerUrl(baseUrl)
+    let response: Response
+    try {
+      response = await fetch(`${normalizedUrl}/System/Info/Public`, { headers: { Accept: 'application/json' } })
+    } catch (error) {
+      throw new Error(`无法连接媒体服务器：${error instanceof Error ? error.message : String(error)}`)
+    }
+    if (!response.ok) {
+      throw new Error(`无法连接媒体服务器（${response.status}）：${response.statusText}`)
+    }
+    let info: PublicSystemInfo
+    try {
+      info = await response.json() as PublicSystemInfo
+    } catch {
+      throw new Error('媒体服务器返回的公开信息格式无效')
+    }
+    const finalUrl = response.url.replace(/\/System\/Info\/Public\/?$/i, '') || normalizedUrl
+    return { baseUrl: normalizeServerUrl(finalUrl), identity: identifyMediaServer(info) }
+  }
+
+  static async authenticate(baseUrl: string, username: string, password: string, identity: MediaServerIdentity, deviceId = 'ember-player'): Promise<AuthResponse & { identity: MediaServerIdentity; baseUrl: string }> {
+    const client = new MediaServerClient(baseUrl, '', '', identity, deviceId)
+    const result = await client.request<AuthResponse>('/Users/AuthenticateByName', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ Username: username, Pw: password }),
     })
+    if (!result || typeof result.AccessToken !== 'string' || !result.AccessToken.trim() || !result.User || typeof result.User.Id !== 'string' || !result.User.Id.trim() || typeof result.User.Name !== 'string' || !result.User.Name.trim()) {
+      throw new Error(`${mediaServerLabel(identity.kind)} 登录响应缺少有效用户或令牌`)
+    }
+    return { ...result, identity, baseUrl: client.baseUrl }
   }
 
   async request<T>(path: string, init: RequestInit = {}): Promise<T> {
     const method = init.method || 'GET'
     const endpoint = path.split('?')[0]
     const startedAt = Date.now()
-    logger.info('emby', 'request-start', { method, endpoint })
+    logger.info('media-server', 'request-start', { kind: this.identity.kind, method, endpoint })
     const headers = new Headers(init.headers)
     headers.set('Accept', 'application/json')
-    headers.set('X-Emby-Authorization', this.clientHeader())
-    if (this.token) {
-      headers.set('X-MediaBrowser-Token', this.token)
-    }
+    this.setAuthorization(headers)
 
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
@@ -101,27 +172,27 @@ export class EmbyClient {
     try {
       response = await fetch(this.resolveUrl(path), { ...init, headers, signal: init.signal || controller.signal })
     } catch (error) {
-      logger.error('emby', 'request-failed', error, { method, endpoint, durationMs: Date.now() - startedAt })
+      logger.error('media-server', 'request-failed', error, { kind: this.identity.kind, method, endpoint, durationMs: Date.now() - startedAt })
       throw error
     } finally {
       clearTimeout(timer)
     }
     if (!response.ok) {
       const body = await response.text().catch(() => '')
-      logger.warn('emby', 'request-failed', { method, endpoint, status: response.status, durationMs: Date.now() - startedAt })
-      throw new Error(`Emby 请求失败（${response.status}）：${body.slice(0, 180) || response.statusText}`)
+      logger.warn('media-server', 'request-failed', { kind: this.identity.kind, method, endpoint, status: response.status, durationMs: Date.now() - startedAt })
+      throw new Error(`${mediaServerLabel(this.identity.kind)} 请求失败（${response.status}）：${body.slice(0, 180) || response.statusText}`)
     }
 
     if (response.status === 204) {
-      logger.info('emby', 'request-complete', { method, endpoint, status: response.status, durationMs: Date.now() - startedAt })
+      logger.info('media-server', 'request-complete', { kind: this.identity.kind, method, endpoint, status: response.status, durationMs: Date.now() - startedAt })
       return undefined as T
     }
     try {
       const result = await response.json() as T
-      logger.info('emby', 'request-complete', { method, endpoint, status: response.status, durationMs: Date.now() - startedAt })
+      logger.info('media-server', 'request-complete', { kind: this.identity.kind, method, endpoint, status: response.status, durationMs: Date.now() - startedAt })
       return result
     } catch (error) {
-      logger.error('emby', 'response-parse-failed', error, { method, endpoint, status: response.status, durationMs: Date.now() - startedAt })
+      logger.error('media-server', 'response-parse-failed', error, { kind: this.identity.kind, method, endpoint, status: response.status, durationMs: Date.now() - startedAt })
       throw error
     }
   }
@@ -129,40 +200,37 @@ export class EmbyClient {
   async requestBinary(path: string): Promise<{ mimeType: string; data: string }> {
     const endpoint = path.split('?')[0]
     const startedAt = Date.now()
-    logger.info('emby', 'binary-request-start', { method: 'GET', endpoint })
+    logger.info('media-server', 'binary-request-start', { kind: this.identity.kind, method: 'GET', endpoint })
     const headers = new Headers()
-    headers.set('X-Emby-Authorization', this.clientHeader())
-    if (this.token) {
-      headers.set('X-MediaBrowser-Token', this.token)
-    }
+    this.setAuthorization(headers)
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
     let response: Response
     try {
       response = await fetch(this.resolveUrl(path), { headers, signal: controller.signal })
     } catch (error) {
-      logger.error('emby', 'binary-request-failed', error, { endpoint, durationMs: Date.now() - startedAt })
+      logger.error('media-server', 'binary-request-failed', error, { kind: this.identity.kind, endpoint, durationMs: Date.now() - startedAt })
       throw error
     } finally {
       clearTimeout(timer)
     }
     if (!response.ok) {
-      logger.warn('emby', 'binary-request-failed', { endpoint, status: response.status, durationMs: Date.now() - startedAt })
-      throw new Error(`图片请求失败（${response.status}）`)
+      logger.warn('media-server', 'binary-request-failed', { kind: this.identity.kind, endpoint, status: response.status, durationMs: Date.now() - startedAt })
+      throw new Error(`${mediaServerLabel(this.identity.kind)} 图片请求失败（${response.status}）`)
     }
     const contentType = response.headers.get('content-type') || 'image/jpeg'
     try {
       const buffer = Buffer.from(await response.arrayBuffer())
-      logger.info('emby', 'binary-request-complete', { endpoint, status: response.status, durationMs: Date.now() - startedAt })
+      logger.info('media-server', 'binary-request-complete', { kind: this.identity.kind, endpoint, status: response.status, durationMs: Date.now() - startedAt })
       return { mimeType: contentType, data: buffer.toString('base64') }
     } catch (error) {
-      logger.error('emby', 'binary-response-read-failed', error, { endpoint, status: response.status, durationMs: Date.now() - startedAt })
+      logger.error('media-server', 'binary-response-read-failed', error, { kind: this.identity.kind, endpoint, status: response.status, durationMs: Date.now() - startedAt })
       throw error
     }
   }
 
-  async getViews(): Promise<EmbyView[]> {
-    const result = parseQueryResult<EmbyView>(
+  async getViews(): Promise<MediaView[]> {
+    const result = parseQueryResult<MediaView>(
       await this.request(`/Users/${encodeURIComponent(this.userId)}/Views`),
       '/Users/{UserId}/Views',
     )
@@ -201,7 +269,7 @@ export class EmbyClient {
     if (options.searchTerm) params.set('SearchTerm', options.searchTerm)
     if (options.filters) params.set('Filters', options.filters)
     if (options.isResumable) params.set('Filters', 'IsResumable')
-    return parseQueryResult<EmbyItem>(
+    return parseQueryResult<MediaItem>(
       await this.request(`/Users/${encodeURIComponent(this.userId)}/Items?${params.toString()}`),
       '/Users/{UserId}/Items',
     ) as ItemResult
@@ -220,12 +288,12 @@ export class EmbyClient {
     })
     const value = await this.request(`/Movies/Recommendations?${params.toString()}`)
     if (!Array.isArray(value)) {
-      throw new Error('Emby 接口 /Movies/Recommendations 返回格式无效')
+      throw new Error(`${mediaServerLabel(this.identity.kind)} 接口 /Movies/Recommendations 返回格式无效`)
     }
     return value as RecommendationDto[]
   }
 
-  async getItem(itemId: string): Promise<EmbyItem> {
+  async getItem(itemId: string): Promise<MediaItem> {
     const params = new URLSearchParams({
       UserId: this.userId,
       Fields: 'Overview,Genres,MediaStreams,ProviderIds,DateCreated,UserData',
@@ -252,14 +320,14 @@ export class EmbyClient {
       ImageTypeLimit: '1',
     })
     if (seriesId) params.set('SeriesId', seriesId)
-    return parseQueryResult<EmbyItem>(
+    return parseQueryResult<MediaItem>(
       await this.request(`/Shows/NextUp?${params.toString()}`),
       '/Shows/NextUp',
     ) as ItemResult
   }
 
-  async getSeriesEpisodes(seriesId: string): Promise<EmbyItem[]> {
-    const items: EmbyItem[] = []
+  async getSeriesEpisodes(seriesId: string): Promise<MediaItem[]> {
+    const items: MediaItem[] = []
     let startIndex = 0
     let totalRecordCount = Number.POSITIVE_INFINITY
     let pageCount = 0
@@ -278,7 +346,7 @@ export class EmbyClient {
         EnableUserData: 'true',
         ImageTypeLimit: '1',
       })
-      const result = parseQueryResult<EmbyItem>(
+      const result = parseQueryResult<MediaItem>(
         await this.request(`/Shows/${encodeURIComponent(seriesId)}/Episodes?${params.toString()}`),
         '/Shows/{SeriesId}/Episodes',
       ) as ItemResult
@@ -310,6 +378,9 @@ export class EmbyClient {
   }): string {
     const rawUrl = source.DirectStreamUrl || `/Videos/${encodeURIComponent(itemId)}/stream`
     const url = new URL(this.resolveUrl(rawUrl))
+    for (const key of [...url.searchParams.keys()]) {
+      if (/^(?:api[_-]?key|access[_-]?token|x[-_]emby[-_]token|x[-_]mediabrowser[-_]token|token)$/i.test(key)) url.searchParams.delete(key)
+    }
     if (!source.DirectStreamUrl) {
       url.searchParams.set('MediaSourceId', source.Id)
       url.searchParams.set('Static', 'true')
@@ -347,6 +418,15 @@ export class EmbyClient {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     })
+  }
+
+  private setAuthorization(headers: Headers): void {
+    if (this.identity.kind === 'jellyfin') {
+      headers.set('Authorization', buildMediaServerAuthorization(this.identity.kind, this.token, this.deviceId))
+      return
+    }
+    headers.set('X-Emby-Authorization', this.clientHeader())
+    if (this.token) headers.set('X-MediaBrowser-Token', this.token)
   }
 
   private clientHeader(): string {

@@ -1,6 +1,6 @@
-import type { EmbyItem } from '../src/types'
+import type { MediaItem } from '../src/types'
 
-export function resolveResumeTicks(item: EmbyItem, explicitTicks?: number): number {
+export function resolveResumeTicks(item: MediaItem, explicitTicks?: number): number {
   if (explicitTicks !== undefined) return Math.max(0, explicitTicks)
   if (item.UserData?.Played) return 0
   return Math.max(0, item.UserData?.PlaybackPositionTicks || 0)

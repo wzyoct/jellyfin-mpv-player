@@ -1,4 +1,4 @@
-import type { EmbyItem } from './types'
+import type { MediaItem } from './types'
 
 export type PosterMode = 'item' | 'series'
 
@@ -14,7 +14,7 @@ function addSource(sources: PosterSource[], source: PosterSource): void {
   sources.push(source)
 }
 
-export function resolvePosterSources(item: EmbyItem, mode: PosterMode = 'item'): PosterSource[] {
+export function resolvePosterSources(item: MediaItem, mode: PosterMode = 'item'): PosterSource[] {
   const sources: PosterSource[] = []
   if (mode === 'series' && item.Type === 'Episode' && item.SeriesId) {
     addSource(sources, {
@@ -46,7 +46,7 @@ export function resolvePosterSources(item: EmbyItem, mode: PosterMode = 'item'):
   return sources
 }
 
-export function resolvePosterSource(item: EmbyItem, mode: PosterMode = 'item'): PosterSource {
+export function resolvePosterSource(item: MediaItem, mode: PosterMode = 'item'): PosterSource {
   return resolvePosterSources(item, mode)[0] || {
     itemId: item.Id,
     imageType: 'Primary',
@@ -54,7 +54,7 @@ export function resolvePosterSource(item: EmbyItem, mode: PosterMode = 'item'): 
   }
 }
 
-export function resolveBackdropSources(item: EmbyItem, ancestors: EmbyItem[] = []): PosterSource[] {
+export function resolveBackdropSources(item: MediaItem, ancestors: MediaItem[] = []): PosterSource[] {
   const sources: PosterSource[] = []
   addSource(sources, { itemId: item.Id, imageType: 'Backdrop', tag: item.BackdropImageTags?.[0] })
 

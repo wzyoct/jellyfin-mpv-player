@@ -1,7 +1,7 @@
 {
   "name": "ember-player",
-  "version": "0.8.7",
-  "description": "A focused Emby desktop client powered by MPV.",
+  "version": "0.9.0",
+  "description": "A Jellyfin-first desktop client with Emby compatibility, powered by MPV.",
   "productName": "Ember Player",
   "main": "dist-electron/electron/main.js",
   "author": "Ember Player",
@@ -11,7 +11,7 @@
     "build": "npm run build:renderer && npm run build:electron",
     "build:renderer": "vite build",
     "build:electron": "tsc -p electron/tsconfig.json && vite build --config vite.preload.config.ts",
-    "test:contract": "npm run build:electron && node scripts/preload-contract-smoke.cjs && node scripts/emby-contract-smoke.cjs",
+    "test:contract": "npm run build:electron && node scripts/preload-contract-smoke.cjs && node scripts/media-server-contract-smoke.cjs",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "typecheck": "vue-tsc --noEmit && tsc -p electron/tsconfig.json --noEmit",

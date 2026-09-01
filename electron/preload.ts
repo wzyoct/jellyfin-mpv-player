@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
-  EmberApi,
+  MediaServerApi,
   ImageRequest,
   ItemsQuery,
   PlaybackCommand,
@@ -15,19 +15,19 @@ function invoke<T>(channel: string, ...args: unknown[]): Promise<T> {
   }) as Promise<T>
 }
 
-const api: EmberApi = {
+const api: MediaServerApi = {
   getSettings: () => invoke('settings:get'),
   saveSettings: (input: SettingsInput) => invoke('settings:save', input),
-  login: (input) => invoke('emby:login', input),
-  logout: () => invoke('emby:logout'),
-  getViews: () => invoke('emby:get-views'),
-  getItems: (query?: ItemsQuery) => invoke('emby:get-items', query),
-  getMovieRecommendations: () => invoke('emby:get-movie-recommendations'),
-  getItem: (itemId: string) => invoke('emby:get-item', itemId),
-  getPlaybackInfo: (itemId: string) => invoke('emby:get-playback-info', itemId),
-  getNextUp: (seriesId?: string) => invoke('emby:get-next-up', seriesId),
-  getSeriesEpisodes: (seriesId: string) => invoke('emby:get-series-episodes', seriesId),
-  getImage: (request: ImageRequest) => invoke('emby:get-image', request),
+  login: (input) => invoke('media:login', input),
+  logout: () => invoke('media:logout'),
+  getViews: () => invoke('media:get-views'),
+  getItems: (query?: ItemsQuery) => invoke('media:get-items', query),
+  getMovieRecommendations: () => invoke('media:get-movie-recommendations'),
+  getItem: (itemId: string) => invoke('media:get-item', itemId),
+  getPlaybackInfo: (itemId: string) => invoke('media:get-playback-info', itemId),
+  getNextUp: (seriesId?: string) => invoke('media:get-next-up', seriesId),
+  getSeriesEpisodes: (seriesId: string) => invoke('media:get-series-episodes', seriesId),
+  getImage: (request: ImageRequest) => invoke('media:get-image', request),
   getFullScreen: () => invoke('window:get-full-screen'),
   setFullScreen: (enabled: boolean) => invoke('window:set-full-screen', enabled),
   onFullScreenChanged: (callback) => {
@@ -48,7 +48,7 @@ const api: EmberApi = {
   },
 }
 
-contextBridge.exposeInMainWorld('emby', api)
+contextBridge.exposeInMainWorld('mediaServer', api)
 
 function reportRendererError(kind: string, error: unknown): void {
   const value = error instanceof Error ? error : new Error(String(error))

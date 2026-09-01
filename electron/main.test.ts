@@ -202,7 +202,7 @@ describe('Electron main process IPC orchestration', () => {
       mpvPath: '  "C:\\Program Files\\mpv\\mpv.exe"  ',
     })
     expect(saved).toMatchObject({
-      serverUrl: 'http://media.example.test/emby',
+      serverUrl: 'http://media.example.test',
       username: 'mickey',
       mpvPath: 'C:\\Program Files\\mpv\\mpv.exe',
       connected: false,
@@ -228,40 +228,42 @@ describe('Electron main process IPC orchestration', () => {
 
   it('logs in, forwards authenticated API calls, and caches images', async () => {
     mocks.fetchMock
+      .mockResolvedValueOnce(jsonResponse({ ProductName: 'Jellyfin Server', ServerName: 'Test Jellyfin', Version: '10.11.11' }))
       .mockResolvedValueOnce(jsonResponse({ AccessToken: 'token-1', User: { Id: 'user-1', Name: 'Mickey' } }))
       .mockResolvedValueOnce(new Response(Uint8Array.from([1, 2, 3]), { status: 200, headers: { 'content-type': 'image/png' } }))
-    const result = await handler('emby:login')({}, {
+    const result = await handler('media:login')({}, {
       serverUrl: 'media.example.test',
       username: ' mickey ',
       password: 'secret',
       mpvPath: 'mpv.exe',
     })
     expect(result.user).toEqual({ Id: 'user-1', Name: 'Mickey' })
-    expect(result.settings).toMatchObject({ connected: true, userId: 'user-1', username: 'mickey' })
-    const [loginUrl, loginInit] = mocks.fetchMock.mock.calls[0]
-    expect(loginUrl).toBe('http://media.example.test/emby/Users/AuthenticateByName')
+    expect(result.settings).toMatchObject({ connected: true, userId: 'user-1', username: 'mickey', serverKind: 'jellyfin', serverVersion: '10.11.11' })
+    const [loginUrl, loginInit] = mocks.fetchMock.mock.calls[1]
+    expect(loginUrl).toBe('http://media.example.test/Users/AuthenticateByName')
     expect(JSON.parse(loginInit.body)).toEqual({ Username: 'mickey', Pw: 'secret' })
 
     const request = { itemId: 'item-1', imageType: 'Primary', tag: 'tag-1', maxWidth: 480 }
-    await expect(handler('emby:get-image')({}, request)).resolves.toBe('data:image/png;base64,AQID')
-    await expect(handler('emby:get-image')({}, request)).resolves.toBe('data:image/png;base64,AQID')
-    expect(mocks.fetchMock).toHaveBeenCalledTimes(2)
-    expect(mocks.fetchMock.mock.calls[1][0]).toContain('/Items/item-1/Images/Primary')
+    await expect(handler('media:get-image')({}, request)).resolves.toBe('data:image/png;base64,AQID')
+    await expect(handler('media:get-image')({}, request)).resolves.toBe('data:image/png;base64,AQID')
+    expect(mocks.fetchMock).toHaveBeenCalledTimes(3)
+    expect(mocks.fetchMock.mock.calls[2][0]).toContain('/Items/item-1/Images/Primary')
+    expect((mocks.fetchMock.mock.calls[2][1].headers as Headers).get('Authorization')).toContain('Token="token-1"')
 
     let resolveImage!: (response: Response) => void
     const pendingImage = new Promise<Response>((resolve) => { resolveImage = resolve })
     mocks.fetchMock.mockReturnValueOnce(pendingImage)
     const concurrentRequest = { itemId: 'item-2', imageType: 'Primary', tag: 'tag-2', maxWidth: 480 }
-    const first = handler('emby:get-image')({}, concurrentRequest)
-    const second = handler('emby:get-image')({}, concurrentRequest)
+    const first = handler('media:get-image')({}, concurrentRequest)
+    const second = handler('media:get-image')({}, concurrentRequest)
     await flush()
-    expect(mocks.fetchMock).toHaveBeenCalledTimes(3)
+    expect(mocks.fetchMock).toHaveBeenCalledTimes(4)
     resolveImage(new Response(Uint8Array.from([4, 5, 6]), { status: 200, headers: { 'content-type': 'image/png' } }))
     await expect(Promise.all([first, second])).resolves.toEqual([
       'data:image/png;base64,BAUG',
       'data:image/png;base64,BAUG',
     ])
-    expect(mocks.fetchMock).toHaveBeenCalledTimes(3)
+    expect(mocks.fetchMock).toHaveBeenCalledTimes(4)
   })
 
   it('starts a resumed movie and drives MPV progress and completion events', async () => {
@@ -321,8 +323,33 @@ describe('Electron main process IPC orchestration', () => {
     })
   })
 
+  it('rejects a Jellyfin version outside the supported stable baseline', async () => {
+    mocks.fetchMock.mockResolvedValueOnce(jsonResponse({ ProductName: 'Jellyfin Server', Version: '12.0.0-rc7' }))
+    await expect(handler('media:login')({}, {
+      serverUrl: 'media.example.test',
+      username: 'mickey',
+      password: '',
+      mpvPath: 'mpv.exe',
+    })).rejects.toThrow('需要 Jellyfin 10.11.x')
+  })
+
   it('logs out, clears connection state, and clears the image cache', async () => {
-    const settings = await handler('emby:logout')()
+    const switched = await handler('settings:save')({}, {
+      serverUrl: 'other.example.test/jellyfin',
+      username: 'next-user',
+      mpvPath: 'mpv.exe',
+    })
+    expect(switched).toMatchObject({
+      serverUrl: 'http://other.example.test/jellyfin',
+      username: 'next-user',
+      connected: false,
+      userId: undefined,
+      serverKind: undefined,
+      serverName: undefined,
+      serverVersion: undefined,
+    })
+
+    const settings = await handler('media:logout')()
     expect(settings).toMatchObject({ connected: false, userId: undefined })
     expect(await handler('settings:get')()).toMatchObject({ connected: false })
   })

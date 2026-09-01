@@ -4,8 +4,8 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App.vue'
 import type {
-  EmberApi,
-  EmbyItem,
+  MediaServerApi,
+  MediaItem,
   PlaybackEvent,
   PlaybackSnapshot,
   PublicSettings,
@@ -15,12 +15,15 @@ const settings = (connected = false): PublicSettings => ({
   serverUrl: 'http://media.example.test/emby',
   username: connected ? 'mickey' : '',
   userId: connected ? 'user-1' : undefined,
+  serverKind: connected ? 'emby' : undefined,
+  serverName: connected ? 'Emby Server' : undefined,
+  serverVersion: connected ? '4.9.5.0' : undefined,
   mpvPath: 'mpv.exe',
   connected,
   secureStorageAvailable: true,
 })
 
-const movie = (id: string, name: string): EmbyItem => ({
+const movie = (id: string, name: string): MediaItem => ({
   Id: id,
   Name: name,
   Type: 'Movie',
@@ -38,7 +41,7 @@ const idleSnapshot = (): PlaybackSnapshot => ({
   positionTicks: 0,
 })
 
-function createApi(overrides: Partial<Record<keyof EmberApi, unknown>> = {}): EmberApi {
+function createApi(overrides: Partial<Record<keyof MediaServerApi, unknown>> = {}): MediaServerApi {
   const api: Record<string, unknown> = {
     getSettings: vi.fn(async () => settings(false)),
     saveSettings: vi.fn(async () => settings(true)),
@@ -47,7 +50,7 @@ function createApi(overrides: Partial<Record<keyof EmberApi, unknown>> = {}): Em
     getViews: vi.fn(async () => []),
     getItems: vi.fn(async () => ({ Items: [], TotalRecordCount: 0 })),
     getMovieRecommendations: vi.fn(async () => []),
-    getItem: vi.fn(async (item: EmbyItem) => item),
+    getItem: vi.fn(async (item: MediaItem) => item),
     getPlaybackInfo: vi.fn(async () => ({ MediaSources: [] })),
     getNextUp: vi.fn(async () => ({ Items: [], TotalRecordCount: 0 })),
     getSeriesEpisodes: vi.fn(async () => []),
@@ -64,7 +67,7 @@ function createApi(overrides: Partial<Record<keyof EmberApi, unknown>> = {}): Em
     onPlaybackChanged: vi.fn(() => vi.fn()),
   }
   Object.assign(api, overrides)
-  return api as unknown as EmberApi
+  return api as unknown as MediaServerApi
 }
 
 const iconNames = [
@@ -88,14 +91,14 @@ stubs.MediaRail = {
 
 const mountedWrappers: VueWrapper[] = []
 
-function mountApp(api: EmberApi, attachTo?: Element): VueWrapper {
-  window.emby = api
+function mountApp(api: MediaServerApi, attachTo?: Element): VueWrapper {
+  window.mediaServer = api
   const wrapper = mount(App, { attachTo, global: { stubs } })
   mountedWrappers.push(wrapper)
   return wrapper
 }
 
-function connectedHomeApi(): EmberApi {
+function connectedHomeApi(): MediaServerApi {
   const latest = movie('latest-1', '最近加入')
   const recommended = movie('recommended-1', '推荐电影')
   const continued = { ...movie('continue-1', '继续观看'), UserData: { PlaybackPositionTicks: 10_000_000 } }
@@ -130,14 +133,31 @@ describe('App', () => {
     vi.restoreAllMocks()
   })
 
-  it('shows the connection form when no saved Emby connection exists', async () => {
+  it('shows the Jellyfin-first connection form when no saved connection exists', async () => {
     const api = createApi()
     const wrapper = mountApp(api)
     await flushPromises()
 
-    expect(wrapper.text()).toContain('连接你的 Emby')
+    expect(wrapper.text()).toContain('连接你的 Jellyfin')
     expect(wrapper.find('#server-url').exists()).toBe(true)
     expect(vi.mocked(api.getViews)).not.toHaveBeenCalled()
+  })
+
+  it('shows the detected Jellyfin identity after restoring a connection', async () => {
+    const api = createApi({
+      getSettings: vi.fn(async () => ({
+        ...settings(true),
+        serverUrl: 'http://media.example.test/jellyfin',
+        serverKind: 'jellyfin',
+        serverName: 'Home Jellyfin',
+        serverVersion: '10.11.11',
+      })),
+    })
+    const wrapper = mountApp(api)
+    await flushPromises()
+    await wrapper.get('button[title="设置"]').trigger('click')
+    expect(wrapper.text()).toContain('当前服务：Home Jellyfin 10.11.11')
+    expect(wrapper.text()).toContain('Jellyfin 服务器地址')
   })
 
   it('loads the home collections, paginates, deduplicates recommendations, and renders fallbacks', async () => {
@@ -206,7 +226,7 @@ describe('App', () => {
     await disconnectButton?.trigger('click')
     await flushPromises()
     expect(api.logout).toHaveBeenCalledTimes(1)
-    expect(wrapper.text()).toContain('连接你的 Emby')
+    expect(wrapper.text()).toContain('连接你的 Jellyfin')
   })
 
   it('validates and submits the login form, then loads the home page', async () => {
@@ -214,7 +234,7 @@ describe('App', () => {
     const wrapper = mountApp(api, document.body)
     await flushPromises()
     await wrapper.get('form.settings-form').trigger('submit')
-    expect(wrapper.text()).toContain('服务器地址、用户名和密码不能为空')
+    expect(wrapper.text()).toContain('服务器地址和用户名不能为空')
 
     await wrapper.get('#server-url').setValue('http://media.example.test')
     await wrapper.get('#username').setValue('mickey')
@@ -233,8 +253,8 @@ describe('App', () => {
 
   it('debounces search and keeps the newest response when requests resolve out of order', async () => {
     const api = connectedHomeApi()
-    let resolveFirst!: (value: { Items: EmbyItem[]; TotalRecordCount: number }) => void
-    let resolveSecond!: (value: { Items: EmbyItem[]; TotalRecordCount: number }) => void
+    let resolveFirst!: (value: { Items: MediaItem[]; TotalRecordCount: number }) => void
+    let resolveSecond!: (value: { Items: MediaItem[]; TotalRecordCount: number }) => void
     vi.mocked(api.getItems).mockImplementation(async (query: any = {}) => {
       if (query.searchTerm === 'first') return new Promise((resolve) => { resolveFirst = resolve })
       if (query.searchTerm === 'second') return new Promise((resolve) => { resolveSecond = resolve })

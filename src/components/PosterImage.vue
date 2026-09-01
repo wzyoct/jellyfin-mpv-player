@@ -2,12 +2,12 @@
 import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { Film, ImageOff } from 'lucide-vue-next'
 import { resolveBackdropSources, resolvePosterSources, type PosterSource } from '../posterSource'
-import type { EmbyItem } from '../types'
+import type { MediaItem } from '../types'
 
 const IMAGE_REQUEST_TIMEOUT_MS = 20_000
 
 const props = withDefaults(defineProps<{
-  item: EmbyItem
+  item: MediaItem
   variant?: 'poster' | 'backdrop'
   eager?: boolean
   maxWidth?: number
@@ -50,11 +50,11 @@ async function loadImage(): Promise<void> {
 }
 
 async function buildBackdropCandidates(): Promise<PosterSource[]> {
-  const ancestors: EmbyItem[] = []
+  const ancestors: MediaItem[] = []
   const seasonId = props.item.SeasonId || (props.item.Type === 'Episode' ? props.item.ParentId : undefined)
   if (seasonId && seasonId !== props.item.Id) {
     try {
-      ancestors.push(await window.emby.getItem(seasonId))
+      ancestors.push(await window.mediaServer.getItem(seasonId))
     } catch {
       // The inherited parent metadata remains available when the season request fails.
     }
@@ -62,7 +62,7 @@ async function buildBackdropCandidates(): Promise<PosterSource[]> {
   const seriesId = props.item.SeriesId || (props.item.Type === 'Season' ? props.item.ParentId : undefined)
   if (seriesId && seriesId !== props.item.Id && seriesId !== seasonId) {
     try {
-      ancestors.push(await window.emby.getItem(seriesId))
+      ancestors.push(await window.mediaServer.getItem(seriesId))
     } catch {
       // The item's own primary image remains the final fallback.
     }
@@ -82,7 +82,7 @@ async function loadCandidate(requestId: number, index: number): Promise<void> {
   try {
     let timeoutId: ReturnType<typeof setTimeout> | undefined
     const nextImageUrl = await Promise.race([
-      window.emby.getImage({
+      window.mediaServer.getImage({
         itemId: candidate.itemId,
         imageType: candidate.imageType,
         tag: candidate.tag,

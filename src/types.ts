@@ -24,7 +24,7 @@ export interface MediaStream {
   Path?: string
 }
 
-export interface EmbyItem {
+export interface MediaItem {
   Id: string
   Name: string
   Type: ItemType
@@ -54,7 +54,7 @@ export interface EmbyItem {
   CommunityRating?: number
 }
 
-export interface EmbyView {
+export interface MediaView {
   Id: string
   Name: string
   CollectionType?: string
@@ -67,10 +67,10 @@ export interface QueryResult<T> {
   StartIndex?: number
 }
 
-export type ItemResult = QueryResult<EmbyItem>
+export type ItemResult = QueryResult<MediaItem>
 
 export interface RecommendationDto {
-  Items: EmbyItem[]
+  Items: MediaItem[]
   RecommendationType?: string
   BaselineItemName?: string
   CategoryId?: number
@@ -106,10 +106,21 @@ export interface PlaybackInfo {
   PlaySessionId?: string
 }
 
+export type MediaServerKind = 'jellyfin' | 'emby'
+
+export interface MediaServerIdentity {
+  kind: MediaServerKind
+  name: string
+  version: string
+}
+
 export interface PublicSettings {
   serverUrl: string
   username: string
   userId?: string
+  serverKind?: MediaServerKind
+  serverName?: string
+  serverVersion?: string
   mpvPath: string
   connected: boolean
   secureStorageAvailable: boolean
@@ -237,18 +248,18 @@ export interface PlaybackReportPayload {
   QueueableMediaTypes?: string[]
 }
 
-export interface EmberApi {
+export interface MediaServerApi {
   getSettings(): Promise<PublicSettings>
   saveSettings(input: SettingsInput): Promise<PublicSettings>
   login(input: { serverUrl: string; username: string; password: string; mpvPath: string }): Promise<LoginResult>
   logout(): Promise<PublicSettings>
-  getViews(): Promise<EmbyView[]>
+  getViews(): Promise<MediaView[]>
   getItems(query?: ItemsQuery): Promise<ItemResult>
   getMovieRecommendations(): Promise<RecommendationDto[]>
-  getItem(itemId: string): Promise<EmbyItem>
+  getItem(itemId: string): Promise<MediaItem>
   getPlaybackInfo(itemId: string): Promise<PlaybackInfo>
   getNextUp(seriesId?: string): Promise<ItemResult>
-  getSeriesEpisodes(seriesId: string): Promise<EmbyItem[]>
+  getSeriesEpisodes(seriesId: string): Promise<MediaItem[]>
   getImage(request: ImageRequest): Promise<string>
   getFullScreen(): Promise<boolean>
   setFullScreen(enabled: boolean): Promise<boolean>

@@ -1,10 +1,12 @@
 const assert = require('node:assert/strict')
-const { EmbyClient } = require('../dist-electron/electron/emby.js')
+const { MediaServerClient } = require('../dist-electron/electron/mediaServer.js')
 
 let responseBody = null
 let lastUrl = ''
 let lastInit = null
 const originalFetch = global.fetch
+const embyIdentity = { kind: 'emby', name: 'Emby Server', version: '4.9.5.0' }
+const jellyfinIdentity = { kind: 'jellyfin', name: 'Jellyfin Server', version: '10.11.11' }
 
 global.fetch = async (url, init) => {
   lastUrl = String(url)
@@ -16,7 +18,7 @@ global.fetch = async (url, init) => {
 }
 
 async function run() {
-  const client = new EmbyClient('http://127.0.0.1:8096', 'token', 'user')
+  const client = new MediaServerClient('http://127.0.0.1:8096/emby', 'token', 'user', embyIdentity)
 
   responseBody = {
     Items: [{ Id: 'view-1', Name: '电影', CollectionType: 'movies' }],
@@ -63,6 +65,13 @@ async function run() {
   assert.equal(new URL(lastUrl).searchParams.get('IncludeItemTypes'), 'Episode')
   assert.equal(new URL(lastUrl).searchParams.get('EnableImageTypes'), 'Primary,Backdrop,Thumb')
 
+  const jellyfin = new MediaServerClient('http://127.0.0.1:8096', 'token', 'user', jellyfinIdentity)
+  responseBody = { Items: [], TotalRecordCount: 0 }
+  await jellyfin.getItems()
+  assert.match(lastUrl, /\/Users\/user\/Items\?/)
+  assert.match(lastInit.headers.get('Authorization'), /MediaBrowser.*Token="token"/)
+  assert.equal(lastInit.headers.get('X-Emby-Authorization'), null)
+
   responseBody = { Id: 'episode-1', Name: '第一集', Type: 'Episode', ParentBackdropItemId: 'season-1', ParentBackdropImageTags: ['season-backdrop'] }
   const detailed = await client.getItem('episode-1')
   assert.deepEqual(detailed, responseBody)
@@ -90,7 +99,7 @@ async function run() {
 
   responseBody = { Items: [] }
   await assert.rejects(() => client.getViews(), /缺少 Items 或 TotalRecordCount/)
-  console.log('Emby contract smoke test passed')
+  console.log('Media server contract smoke test passed')
 }
 
 run()

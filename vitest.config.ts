@@ -17,7 +17,7 @@ export default defineConfig({
         'electron/preload.ts',
       ],
       thresholds: {
-        'electron/emby.ts': { lines: 90, statements: 90, functions: 90, branches: 80 },
+        'electron/mediaServer.ts': { lines: 90, statements: 90, functions: 90, branches: 80 },
         'electron/{errorMessage,logger,mpvHeaders,mpvIpc,mpvPath,playbackLogic,playbackPlaylist}.ts': {
           lines: 90,
           statements: 90,

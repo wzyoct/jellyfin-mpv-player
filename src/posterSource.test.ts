@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { resolveBackdropSources, resolvePosterSource, resolvePosterSources } from './posterSource'
-import type { EmbyItem } from './types'
+import type { MediaItem } from './types'
 
 describe('resolvePosterSource', () => {
   it('uses the movie primary image by default', () => {
-    const movie: EmbyItem = {
+    const movie: MediaItem = {
       Id: 'movie-1',
       Name: 'Movie',
       Type: 'Movie',
@@ -15,7 +15,7 @@ describe('resolvePosterSource', () => {
   })
 
   it('uses the series primary image for an episode in series mode', () => {
-    const episode: EmbyItem = {
+    const episode: MediaItem = {
       Id: 'episode-1',
       Name: 'Episode',
       Type: 'Episode',
@@ -28,7 +28,7 @@ describe('resolvePosterSource', () => {
   })
 
   it('orders series poster fallbacks before the episode thumbnail', () => {
-    const episode: EmbyItem = {
+    const episode: MediaItem = {
       Id: 'episode-1',
       Name: 'Episode',
       Type: 'Episode',
@@ -49,7 +49,7 @@ describe('resolvePosterSource', () => {
   })
 
   it('deduplicates a parent thumbnail that points to the series', () => {
-    const episode: EmbyItem = {
+    const episode: MediaItem = {
       Id: 'episode-1',
       Name: 'Episode',
       Type: 'Episode',
@@ -65,7 +65,7 @@ describe('resolvePosterSource', () => {
   })
 
   it('keeps the episode image when series metadata is unavailable', () => {
-    const episode: EmbyItem = {
+    const episode: MediaItem = {
       Id: 'episode-1',
       Name: 'Episode',
       Type: 'Episode',
@@ -76,7 +76,7 @@ describe('resolvePosterSource', () => {
   })
 
   it('orders episode backdrop, season backdrop, series backdrop, then series poster', () => {
-    const episode: EmbyItem = {
+    const episode: MediaItem = {
       Id: 'episode-1',
       Name: 'Episode',
       Type: 'Episode',
@@ -87,13 +87,13 @@ describe('resolvePosterSource', () => {
       ParentBackdropImageTags: ['inherited-series-backdrop'],
       SeriesPrimaryImageTag: 'series-poster',
     }
-    const season: EmbyItem = {
+    const season: MediaItem = {
       Id: 'season-1',
       Name: 'Season 1',
       Type: 'Season',
       BackdropImageTags: ['season-backdrop'],
     }
-    const series: EmbyItem = {
+    const series: MediaItem = {
       Id: 'series-1',
       Name: 'Series',
       Type: 'Series',
@@ -111,7 +111,7 @@ describe('resolvePosterSource', () => {
   })
 
   it('uses the series poster when all backdrop candidates are missing', () => {
-    const series: EmbyItem = {
+    const series: MediaItem = {
       Id: 'series-1',
       Name: 'Series',
       Type: 'Series',
@@ -125,7 +125,7 @@ describe('resolvePosterSource', () => {
   })
 
   it('keeps known image owners even when Emby omits image tags', () => {
-    const episode: EmbyItem = {
+    const episode: MediaItem = {
       Id: 'episode-1',
       Name: 'Episode',
       Type: 'Episode',
@@ -133,8 +133,8 @@ describe('resolvePosterSource', () => {
       SeasonId: 'season-1',
       ImageTags: { Primary: 'episode-primary' },
     }
-    const season: EmbyItem = { Id: 'season-1', Name: 'Season 1', Type: 'Season' }
-    const series: EmbyItem = { Id: 'series-1', Name: 'Series', Type: 'Series', ImageTags: { Primary: 'series-primary' } }
+    const season: MediaItem = { Id: 'season-1', Name: 'Season 1', Type: 'Season' }
+    const series: MediaItem = { Id: 'series-1', Name: 'Series', Type: 'Series', ImageTags: { Primary: 'series-primary' } }
 
     expect(resolveBackdropSources(episode, [season, series])).toEqual([
       { itemId: 'episode-1', imageType: 'Backdrop', tag: undefined },

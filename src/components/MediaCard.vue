@@ -3,10 +3,10 @@ import { computed } from 'vue'
 import PosterImage from './PosterImage.vue'
 import { resolvePosterSources, type PosterMode } from '../posterSource'
 import { mediaPresentation } from '../mediaPresentation'
-import type { EmbyItem } from '../types'
+import type { MediaItem } from '../types'
 
 const props = withDefaults(defineProps<{
-  item: EmbyItem
+  item: MediaItem
   showProgress?: boolean
   eager?: boolean
   posterMode?: PosterMode
@@ -17,7 +17,7 @@ const props = withDefaults(defineProps<{
 })
 
 defineEmits<{
-  select: [item: EmbyItem]
+  select: [item: MediaItem]
 }>()
 
 const progress = computed(() => {

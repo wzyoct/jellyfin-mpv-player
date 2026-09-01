@@ -3,11 +3,11 @@ import { nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { ChevronLeft, ChevronRight, LoaderCircle } from 'lucide-vue-next'
 import MediaCard from './MediaCard.vue'
 import type { PosterMode } from '../posterSource'
-import type { EmbyItem } from '../types'
+import type { MediaItem } from '../types'
 
 const props = withDefaults(defineProps<{
   title: string
-  items: EmbyItem[]
+  items: MediaItem[]
   count?: number
   loading?: boolean
   showProgress?: boolean
@@ -22,7 +22,7 @@ const props = withDefaults(defineProps<{
 })
 
 defineEmits<{
-  select: [item: EmbyItem]
+  select: [item: MediaItem]
 }>()
 
 const rail = ref<HTMLElement | null>(null)

@@ -1,18 +1,18 @@
-import type { EmbyItem } from './types'
+import type { MediaItem } from './types'
 
 export interface EpisodeQueuePlan {
-  items: EmbyItem[]
+  items: MediaItem[]
   startIndex: number
 }
 
-export function compareEpisodes(left: EmbyItem, right: EmbyItem): number {
+export function compareEpisodes(left: MediaItem, right: MediaItem): number {
   const season = (left.ParentIndexNumber ?? 0) - (right.ParentIndexNumber ?? 0)
   if (season) return season
   const episode = (left.IndexNumber ?? Number.MAX_SAFE_INTEGER) - (right.IndexNumber ?? Number.MAX_SAFE_INTEGER)
   return episode || left.Name.localeCompare(right.Name)
 }
 
-export function buildEpisodeQueue(items: EmbyItem[], selected: EmbyItem): EpisodeQueuePlan {
+export function buildEpisodeQueue(items: MediaItem[], selected: MediaItem): EpisodeQueuePlan {
   const ordered = items.filter((item) => item.LocationType?.toLowerCase() !== 'virtual').sort(compareEpisodes)
   const selectedSeason = selected.ParentIndexNumber ?? 0
   const candidates = selectedSeason === 0

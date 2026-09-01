@@ -1,10 +1,10 @@
 /// <reference types="vite/client" />
 
-import type { EmberApi } from './types'
+import type { MediaServerApi } from './types'
 
 declare global {
   interface Window {
-    emby: EmberApi
+    mediaServer: MediaServerApi
   }
 }
 

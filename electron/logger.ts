@@ -22,7 +22,7 @@ export function redactText(value: string): string {
   let output = value.slice(0, MAX_TEXT_LENGTH)
   output = output.replace(/https?:\/\/[^\s"'<>]+/gi, (match) => redactUrl(match))
   output = output.replace(/(authorization\s*[:=]\s*)(?:bearer\s+)?[^,\s"']+/gi, '$1[REDACTED]')
-  output = output.replace(/((?:x-media-browser-token|cookie|password|token)\s*[:=]\s*)[^,\s"']+/gi, '$1[REDACTED]')
+  output = output.replace(/((?:x-media-browser-token|cookie|password|token)\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^,\s"']+)/gi, '$1[REDACTED]')
   output = output.replace(/([?&][^=&#\s]+)=([^&#\s]*)/g, '$1=[REDACTED]')
   output = output.replace(/\b[A-Za-z]:\\[^\r\n\t"']+/g, '[path]')
   return output

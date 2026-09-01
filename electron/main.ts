@@ -3,7 +3,7 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { EmbyClient, normalizeServerUrl, type MediaSourceInfo, type PlaybackInfo } from './emby'
+import { MediaServerClient, mediaServerLabel, normalizeServerUrl, type MediaSourceInfo, type PlaybackInfo } from './mediaServer'
 import { MpvIpc, type MpvIpcMessage } from './mpvIpc'
 import { buildMpvHttpHeaders } from './mpvHeaders'
 import { normalizeMpvPath } from './mpvPath'
@@ -14,7 +14,7 @@ import { chooseDefaultSubtitle } from '../src/subtitlePreference'
 import { isResumePositionReached, resolveResumeTicks } from './playbackLogic'
 import type {
   AudioPreference,
-  EmbyItem,
+  MediaItem,
   MediaStream,
   PlaybackCommand,
   PlaybackEvent,
@@ -25,19 +25,29 @@ import type {
   PlaybackPhase,
   StartPlaybackRequest,
   SubtitlePreference,
+  MediaServerIdentity,
+  MediaServerKind,
 } from '../src/types'
 
 interface StoredSettings {
   serverUrl: string
   username: string
   userId?: string
+  serverKind?: MediaServerKind
+  serverName?: string
+  serverVersion?: string
   encryptedToken?: string
   mpvPath: string
   deviceId: string
 }
 
+const KNOWN_SERVER_KINDS: Record<string, MediaServerKind> = {
+  jellyfin: 'jellyfin',
+  emby: 'emby',
+}
+
 interface PlaybackEntry extends PlaybackQueueItem {
-  item: EmbyItem
+  item: MediaItem
   source: MediaSourceInfo
   playbackInfo: PlaybackInfo
   positionSeconds: number
@@ -88,13 +98,13 @@ interface PlaybackSession {
 
 interface PreparedEntry {
   index: number
-  item: EmbyItem
+  item: MediaItem
   entry: PlaybackEntry
 }
 
 interface FailedEntry {
   index: number
-  item: EmbyItem
+  item: MediaItem
   error: string
 }
 
@@ -106,7 +116,7 @@ let storedSettings: StoredSettings = {
   mpvPath: 'mpv.exe',
   deviceId: randomUUID(),
 }
-let embyClient: EmbyClient | null = null
+let mediaServerClient: MediaServerClient | null = null
 let activeSession: PlaybackSession | null = null
 let revisionCounter = 0
 let lastSnapshot: PlaybackSnapshot = {
@@ -150,6 +160,9 @@ function readSettings(): void {
     storedSettings = {
       ...storedSettings,
       ...persisted,
+      serverKind: KNOWN_SERVER_KINDS[String(persisted.serverKind)] || (persisted.userId && persisted.encryptedToken ? 'emby' : undefined),
+      serverName: persisted.serverName || (persisted.userId && persisted.encryptedToken ? 'Emby Server' : undefined),
+      serverVersion: persisted.serverVersion || (persisted.userId && persisted.encryptedToken ? 'legacy' : undefined),
       mpvPath: normalizeMpvPath(persisted.mpvPath),
       deviceId: persisted.deviceId || randomUUID(),
     }
@@ -180,8 +193,11 @@ function publicSettings() {
     serverUrl: storedSettings.serverUrl,
     username: storedSettings.username,
     userId: storedSettings.userId,
+    serverKind: storedSettings.serverKind,
+    serverName: storedSettings.serverName,
+    serverVersion: storedSettings.serverVersion,
     mpvPath: storedSettings.mpvPath || 'mpv.exe',
-    connected: Boolean(embyClient),
+    connected: Boolean(mediaServerClient),
     secureStorageAvailable: safeStorage.isEncryptionAvailable(),
   }
 }
@@ -225,20 +241,29 @@ function restoreClient(): void {
   const token = decryptToken()
   if (token && storedSettings.userId) {
     try {
-      embyClient = new EmbyClient(storedSettings.serverUrl, token, storedSettings.userId, storedSettings.deviceId)
+      const identity: MediaServerIdentity = {
+        kind: storedSettings.serverKind || 'emby',
+        name: storedSettings.serverName || (storedSettings.serverKind === 'jellyfin' ? 'Jellyfin Server' : 'Emby Server'),
+        version: storedSettings.serverVersion || 'legacy',
+      }
+      mediaServerClient = new MediaServerClient(storedSettings.serverUrl, token, storedSettings.userId, identity, storedSettings.deviceId)
     } catch (error) {
-      embyClient = null
-      logger.error('emby', 'restore-client-failed', error)
+      mediaServerClient = null
+      logger.error('media-server', 'restore-client-failed', error)
     }
   }
 }
 
-function getClient(): EmbyClient {
-  if (!embyClient) throw new Error('请先连接 Emby 服务器')
-  return embyClient
+function getClient(): MediaServerClient {
+  if (!mediaServerClient) throw new Error('请先连接 Jellyfin 或 Emby 服务器')
+  return mediaServerClient
 }
 
-function queueItem(item: EmbyItem): PlaybackQueueItem {
+function currentServerLabel(): string {
+  return mediaServerLabel(mediaServerClient?.identity.kind)
+}
+
+function queueItem(item: MediaItem): PlaybackQueueItem {
   return {
     itemId: item.Id,
     name: item.Name,
@@ -252,7 +277,7 @@ function queueItem(item: EmbyItem): PlaybackQueueItem {
   }
 }
 
-async function buildQueue(client: EmbyClient, itemId: string): Promise<{ items: EmbyItem[]; startIndex: number }> {
+async function buildQueue(client: MediaServerClient, itemId: string): Promise<{ items: MediaItem[]; startIndex: number }> {
   const selected = await client.getItem(itemId)
   if (selected.Type !== 'Episode' || !selected.SeriesId) return { items: [selected], startIndex: 0 }
 
@@ -276,7 +301,7 @@ function chooseSubtitle(streams: MediaStream[], preference?: SubtitlePreference)
   return chooseDefaultSubtitle(streams)
 }
 
-async function prepareEntry(session: PlaybackSession, item: EmbyItem, startTimeTicks = 0): Promise<PlaybackEntry> {
+async function prepareEntry(session: PlaybackSession, item: MediaItem, startTimeTicks = 0): Promise<PlaybackEntry> {
   const client = getClient()
   const playbackInfo = await client.getPlaybackInfo(item.Id)
   const sources = playbackInfo.MediaSources || []
@@ -359,7 +384,7 @@ function reportPayload(session: PlaybackSession, entry: PlaybackEntry, eventName
 type PlaybackProgressEvent = NonNullable<PlaybackReportPayload['EventName']>
 
 async function reportEntryProgress(session: PlaybackSession, entry: PlaybackEntry, force = false, eventName: PlaybackProgressEvent = 'TimeUpdate'): Promise<void> {
-  const client = embyClient
+  const client = mediaServerClient
   if (!client || entry.finalized || (!force && !entry.positionFresh && !entry.isPaused)) return
   await client.reportProgress(reportPayload(session, entry, eventName))
   entry.positionFresh = false
@@ -379,7 +404,7 @@ async function reportActiveProgress(force = false, eventName: PlaybackProgressEv
     try {
       await reportEntryProgress(session, entry, force, eventName)
     } catch (error) {
-      session.syncError = error instanceof Error ? error.message : 'Emby 进度上报失败'
+      session.syncError = error instanceof Error ? error.message : `${currentServerLabel()} 进度上报失败`
       emitPlayback('sync-error', session, session.syncError)
     } finally {
       session.progressPromise = undefined
@@ -422,16 +447,16 @@ async function finalizeEntry(session: PlaybackSession, entry: PlaybackEntry, rea
   try {
     await reportEntryProgress(session, entry, true, 'TimeUpdate')
   } catch (error) {
-    session.syncError = error instanceof Error ? error.message : 'Emby 进度上报失败'
+    session.syncError = error instanceof Error ? error.message : `${currentServerLabel()} 进度上报失败`
   }
   if (!entry.positionObserved && !session.syncError) session.syncError = '未能取得 MPV 的最终播放位置'
-  const client = embyClient
+  const client = mediaServerClient
   if (client) {
     try {
       await client.reportStopped(reportPayload(session, entry, undefined, entry.playlistIndex ?? session.currentIndex))
       session.syncError = undefined
     } catch (error) {
-      session.syncError = error instanceof Error ? error.message : 'Emby 播放结束状态上报失败'
+      session.syncError = error instanceof Error ? error.message : `${currentServerLabel()} 播放结束状态上报失败`
     }
   }
   entry.finalized = true
@@ -506,13 +531,13 @@ async function activateLoadedEntry(session: PlaybackSession, entry: PlaybackEntr
   }
   entry.isPaused = false
   await session.ipc.setProperty('pause', false)
-  const client = embyClient
+  const client = mediaServerClient
   if (client) {
     try {
       await client.reportPlaying(reportPayload(session, entry))
       session.syncError = undefined
     } catch (error) {
-      session.syncError = error instanceof Error ? error.message : 'Emby 播放开始状态上报失败'
+      session.syncError = error instanceof Error ? error.message : `${currentServerLabel()} 播放开始状态上报失败`
     }
   }
   session.phase = 'playing'
@@ -684,7 +709,7 @@ async function startPlayback(request: StartPlaybackRequest): Promise<PlaybackSna
     subtitlePreference: request.subtitlePreference,
   }
   session.mediaSourceId = request.mediaSourceId
-  const prepared = await mapWithConcurrency<EmbyItem, PreparedEntry | FailedEntry>(queuePlan.items, 4, async (item, index) => {
+  const prepared = await mapWithConcurrency<MediaItem, PreparedEntry | FailedEntry>(queuePlan.items, 4, async (item, index) => {
     try {
       const entry = await prepareEntry(session, item, index === queuePlan.startIndex ? resolveResumeTicks(item, request.startTimeTicks) : 0)
       return { index, item, entry }
@@ -695,13 +720,13 @@ async function startPlayback(request: StartPlaybackRequest): Promise<PlaybackSna
   const selectedResult = prepared.find((result) => result.index === queuePlan.startIndex)
   if (!selectedResult || !('entry' in selectedResult)) throw new Error(`当前剧集《${queuePlan.items[queuePlan.startIndex]?.Name || request.itemId}》无法播放：${selectedResult && 'error' in selectedResult ? selectedResult.error : '读取播放信息失败'}`)
   const selectedEntry = selectedResult.entry
-  const firstHeaders = headerSignature(buildMpvHttpHeaders(selectedEntry.source, client.token))
+  const firstHeaders = headerSignature(buildMpvHttpHeaders(selectedEntry.source, client.token, client.identity.kind, client.deviceId))
   const playable = prepared.filter((result): result is PreparedEntry => {
     if (!('entry' in result)) {
       session.queueWarnings.push({ itemId: result.item.Id, label: result.item.Name, reason: result.error })
       return false
     }
-    if (headerSignature(buildMpvHttpHeaders(result.entry.source, client.token)) !== firstHeaders) {
+    if (headerSignature(buildMpvHttpHeaders(result.entry.source, client.token, client.identity.kind, client.deviceId)) !== firstHeaders) {
       session.queueWarnings.push({ itemId: result.item.Id, label: result.item.Name, reason: '所需 HTTP 请求头与当前播放列表不兼容' })
       return false
     }
@@ -750,7 +775,7 @@ async function startPlayback(request: StartPlaybackRequest): Promise<PlaybackSna
     await attachMpvIpc(session)
     const playlistUrl = buildHexPlaylistUrl(playable.map((result) => ({ item: queueItem(result.item), url: buildStreamUrl(session, result.entry) })))
     await session.ipc.setProperty('pause', true)
-    await session.ipc.setProperty('http-header-fields', buildMpvHttpHeaders(selectedEntry.source, client.token))
+    await session.ipc.setProperty('http-header-fields', buildMpvHttpHeaders(selectedEntry.source, client.token, client.identity.kind, client.deviceId))
     await session.ipc.send(['keybind', 'MBTN_RIGHT', 'script-binding', 'select/select-playlist'])
     await session.ipc.send(['keybind', 'Ctrl+E', 'script-binding', 'select/select-playlist'])
     await session.ipc.send(['loadlist', playlistUrl, 'append'])
@@ -863,47 +888,65 @@ function registerIpc(): void {
     return mainWindow.isFullScreen()
   })
   ipcMain.handle('settings:get', () => publicSettings())
-  ipcMain.handle('settings:save', (_event, input: { serverUrl: string; username: string; mpvPath: string }) => {
+  ipcMain.handle('settings:save', async (_event, input: { serverUrl: string; username: string; mpvPath: string }) => {
     const nextUrl = normalizeServerUrl(input.serverUrl)
-    if (nextUrl !== storedSettings.serverUrl) embyClient = null
+    if (nextUrl !== storedSettings.serverUrl) {
+      await stopActivePlayback()
+      mediaServerClient = null
+      storedSettings.userId = undefined
+      storedSettings.serverKind = undefined
+      storedSettings.serverName = undefined
+      storedSettings.serverVersion = undefined
+      storedSettings.encryptedToken = undefined
+      imageCache.clear()
+      inFlightImageRequests.clear()
+    }
     storedSettings.serverUrl = nextUrl
     storedSettings.username = input.username.trim()
     storedSettings.mpvPath = normalizeMpvPath(input.mpvPath)
     persistSettings()
     return publicSettings()
   })
-  ipcMain.handle('emby:login', async (_event, input: { serverUrl: string; username: string; password: string; mpvPath: string }) => {
-    const serverUrl = normalizeServerUrl(input.serverUrl)
-    const result = await EmbyClient.authenticate(serverUrl, input.username.trim(), input.password)
-    storedSettings.serverUrl = serverUrl
-    storedSettings.username = input.username.trim()
+  ipcMain.handle('media:login', async (_event, input: { serverUrl: string; username: string; password: string; mpvPath: string }) => {
+    const inspected = await MediaServerClient.inspect(input.serverUrl)
+    const username = input.username.trim()
+    if (!username) throw new Error('用户名不能为空')
+    const result = await MediaServerClient.authenticate(inspected.baseUrl, username, input.password, inspected.identity, storedSettings.deviceId)
+    storedSettings.serverUrl = result.baseUrl
+    storedSettings.username = username
     storedSettings.userId = result.User.Id
+    storedSettings.serverKind = result.identity.kind
+    storedSettings.serverName = result.identity.name
+    storedSettings.serverVersion = result.identity.version
     storedSettings.mpvPath = normalizeMpvPath(input.mpvPath)
     storedSettings.encryptedToken = safeStorage.isEncryptionAvailable()
       ? safeStorage.encryptString(result.AccessToken).toString('base64')
       : undefined
-    embyClient = new EmbyClient(serverUrl, result.AccessToken, result.User.Id, storedSettings.deviceId)
+    mediaServerClient = new MediaServerClient(result.baseUrl, result.AccessToken, result.User.Id, result.identity, storedSettings.deviceId)
     persistSettings()
     return { settings: publicSettings(), user: result.User }
   })
-  ipcMain.handle('emby:logout', async () => {
+  ipcMain.handle('media:logout', async () => {
     await stopActivePlayback()
-    embyClient = null
+    mediaServerClient = null
     storedSettings.userId = undefined
+    storedSettings.serverKind = undefined
+    storedSettings.serverName = undefined
+    storedSettings.serverVersion = undefined
     storedSettings.encryptedToken = undefined
     persistSettings()
     imageCache.clear()
     inFlightImageRequests.clear()
     return publicSettings()
   })
-  ipcMain.handle('emby:get-views', () => getClient().getViews())
-  ipcMain.handle('emby:get-items', (_event, query) => getClient().getItems(query || {}))
-  ipcMain.handle('emby:get-movie-recommendations', () => getClient().getMovieRecommendations())
-  ipcMain.handle('emby:get-item', (_event, itemId: string) => getClient().getItem(itemId))
-  ipcMain.handle('emby:get-playback-info', (_event, itemId: string) => getClient().getPlaybackInfo(itemId))
-  ipcMain.handle('emby:get-next-up', (_event, seriesId?: string) => getClient().getNextUp(seriesId))
-  ipcMain.handle('emby:get-series-episodes', (_event, seriesId: string) => getClient().getSeriesEpisodes(seriesId))
-  ipcMain.handle('emby:get-image', async (_event, request: { itemId: string; imageType?: string; tag?: string; maxWidth?: number }) => {
+  ipcMain.handle('media:get-views', () => getClient().getViews())
+  ipcMain.handle('media:get-items', (_event, query) => getClient().getItems(query || {}))
+  ipcMain.handle('media:get-movie-recommendations', () => getClient().getMovieRecommendations())
+  ipcMain.handle('media:get-item', (_event, itemId: string) => getClient().getItem(itemId))
+  ipcMain.handle('media:get-playback-info', (_event, itemId: string) => getClient().getPlaybackInfo(itemId))
+  ipcMain.handle('media:get-next-up', (_event, seriesId?: string) => getClient().getNextUp(seriesId))
+  ipcMain.handle('media:get-series-episodes', (_event, seriesId: string) => getClient().getSeriesEpisodes(seriesId))
+  ipcMain.handle('media:get-image', async (_event, request: { itemId: string; imageType?: string; tag?: string; maxWidth?: number }) => {
     const client = getClient()
     const key = JSON.stringify(request)
     const cached = readCachedImage(key)
@@ -912,7 +955,7 @@ function registerIpc(): void {
     if (pending) return pending
     const requestPromise = client.getImage(request.itemId, request.imageType || 'Primary', request.tag, request.maxWidth || 480)
       .then((image) => {
-        if (embyClient === client) writeCachedImage(key, image)
+        if (mediaServerClient === client) writeCachedImage(key, image)
         return image
       })
       .finally(() => {

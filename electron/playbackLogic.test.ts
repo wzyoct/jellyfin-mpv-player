@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import { isResumePositionReached, resolveResumeTicks } from './playbackLogic'
-import type { EmbyItem } from '../src/types'
+import type { MediaItem } from '../src/types'
 
-function episode(userData?: EmbyItem['UserData']): EmbyItem {
+function episode(userData?: MediaItem['UserData']): MediaItem {
   return { Id: 'episode-1', Name: 'Episode', Type: 'Episode', UserData: userData }
 }
 

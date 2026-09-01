@@ -12,6 +12,7 @@ describe('log sanitization', () => {
     expect(value).not.toContain('secret')
     expect(value).not.toContain('abc')
     expect(redactText('/Items/1?api_key=secret&SearchTerm=movie')).toContain('api_key=[REDACTED]')
+    expect(redactText('Authorization: MediaBrowser Client="Ember Player", Token="secret-token"')).not.toContain('secret-token')
   })
 
   it('redacts sensitive object keys and truncates deep values', () => {
