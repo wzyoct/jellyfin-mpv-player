@@ -104,6 +104,7 @@ let searchTimer: ReturnType<typeof setTimeout> | undefined
 let noticeTimer: ReturnType<typeof setTimeout> | undefined
 let removePlaybackListener: (() => void) | undefined
 let removeFullScreenListener: (() => void) | undefined
+let removeSettingsListener: (() => void) | undefined
 let focusRefreshTimer: ReturnType<typeof setTimeout> | undefined
 let homeRequestId = 0
 let libraryRequestId = 0
@@ -112,7 +113,7 @@ let detailRequestId = 0
 let heroTimer: ReturnType<typeof setInterval> | undefined
 
 const form = reactive({
-  serverUrl: 'http://127.0.0.1:8096',
+  serverUrl: 'http://127.0.0.1:9000',
   username: '',
   password: '',
   mpvPath: 'mpv.exe',
@@ -124,7 +125,8 @@ const serverDescriptor = computed(() => {
   if (!settings.value?.connected) return 'Jellyfin'
   const name = settings.value.serverName || serverLabel.value
   const version = settings.value.serverVersion && settings.value.serverVersion !== 'legacy' ? ` ${settings.value.serverVersion}` : ''
-  return `${name}${version}`
+  const mediaWarp = settings.value.mediaWarpVersion ? ` · MediaWarp ${settings.value.mediaWarpVersion}` : ''
+  return `${name}${version}${mediaWarp}`
 })
 const activeView = computed(() => views.value.find((view) => view.Id === activeViewId.value) || views.value[0])
 const heroItems = computed(() => recommendationItems.value.length ? recommendationItems.value : latestItems.value.slice(0, 8))
@@ -668,10 +670,16 @@ async function playSelected(): Promise<void> {
     const snapshot = await window.jellyfin.playbackStart({
       itemId: item.Id,
       mediaSourceId: selectedSource.value?.Id,
-      audioPreference: { index: selectedAudio.value },
+      audioPreference: (() => {
+        const stream = audioStreams.value.find((candidate) => candidate.Index === selectedAudio.value)
+        return { index: selectedAudio.value, language: stream?.Language || stream?.DisplayLanguage, title: stream?.Title || stream?.DisplayTitle, codec: stream?.Codec }
+      })(),
       subtitlePreference: selectedSubtitle.value === null
         ? { disabled: true }
-        : { index: selectedSubtitle.value },
+        : (() => {
+          const stream = selectedSubtitleStream.value
+          return { index: selectedSubtitle.value, language: stream?.Language || stream?.DisplayLanguage, title: stream?.Title || stream?.DisplayTitle, codec: stream?.Codec }
+        })(),
     })
     handlePlaybackSnapshot(snapshot)
     closeDetails()
@@ -808,6 +816,13 @@ onMounted(async () => {
     removeFullScreenListener = window.jellyfin.onFullScreenChanged((enabled) => {
       isFullScreen.value = enabled
     })
+    if (typeof window.jellyfin.onSettingsChanged === 'function') {
+      removeSettingsListener = window.jellyfin.onSettingsChanged((next) => {
+        applySettings(next)
+        if (next.connected) void loadHome()
+        else activePage.value = 'settings'
+      })
+    }
     isFullScreen.value = await window.jellyfin.getFullScreen()
     const saved = await window.jellyfin.getSettings()
     applySettings(saved)
@@ -835,6 +850,7 @@ onUnmounted(() => {
   if (focusRefreshTimer) clearTimeout(focusRefreshTimer)
   removePlaybackListener?.()
   removeFullScreenListener?.()
+  removeSettingsListener?.()
 })
 </script>
 
@@ -917,8 +933,8 @@ onUnmounted(() => {
           </div>
           <form class="settings-form" @submit.prevent="submitConnection">
             <label class="field-label" for="server-url">{{ serverLabel }} 服务器地址</label>
-            <input id="server-url" v-model="form.serverUrl" class="text-input" type="text" placeholder="http://192.168.1.100:8096" autocomplete="url" />
-            <p class="field-hint">填写你在浏览器中访问 {{ serverLabel }} 的服务根地址，例如 http://192.168.1.100:8096；如果配置了 Base URL，请一并保留。</p>
+            <input id="server-url" v-model="form.serverUrl" class="text-input" type="text" placeholder="http://192.168.1.100:9000" autocomplete="url" />
+            <p class="field-hint">填写 MediaWarp 根地址，例如 http://192.168.1.100:9000；不要填写 Jellyfin 的 8096 直连地址。</p>
 
             <label class="field-label" for="username">用户名</label>
             <input id="username" v-model="form.username" class="text-input" type="text" autocomplete="username" />
@@ -935,7 +951,7 @@ onUnmounted(() => {
               <button class="button button--ghost" type="button" @click="openLogDirectory"><FolderOpen :size="16" />打开日志目录</button>
               <span v-if="mpvValidation" class="mpv-status" :class="{ 'mpv-status--error': !mpvValidation.valid }">{{ mpvValidation.message }}<small v-if="mpvValidation.version">{{ mpvValidation.version }}</small></span>
             </div>
-            <div v-if="errorMessage" class="inline-error"><AlertCircle :size="16" />{{ errorMessage }}</div>
+            <div v-if="errorMessage || settings?.connectionError" class="inline-error"><AlertCircle :size="16" />{{ errorMessage || settings?.connectionError }}</div>
             <div class="settings-actions">
               <button v-if="isConnected" class="button button--ghost" type="button" @click="disconnect">
                 <LogOut :size="17" />断开连接

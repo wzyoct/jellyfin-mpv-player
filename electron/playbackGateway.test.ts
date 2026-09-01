@@ -131,4 +131,42 @@ describe('PlaybackGateway', () => {
     expect(response.status).toBe(404)
     await gateway.dispose()
   })
+
+  it('resolves lazy resources once and retries after a failed resolution', async () => {
+    const source = await listen((_request, response) => {
+      response.writeHead(200, { 'content-type': 'video/mp4' })
+      response.end('lazy')
+    })
+    const client = new JellyfinClient(source.url, 'token', 'user-1', identity)
+    const gateway = new PlaybackGateway(client)
+    await gateway.start()
+    let calls = 0
+    const url = gateway.register({
+      resolve: async () => {
+        calls += 1
+        return { upstreamUrl: `${source.url}/movie.mp4` }
+      },
+    })
+    const [first, second] = await Promise.all([fetch(url), fetch(url)])
+    expect(await first.text()).toBe('lazy')
+    expect(await second.text()).toBe('lazy')
+    expect(calls).toBe(1)
+    await gateway.dispose()
+  })
+
+  it('rejects redirect loops after preserving the last successful diagnostic', async () => {
+    const source = await listen((_request, response) => {
+      response.writeHead(302, { Location: '/loop' })
+      response.end()
+    })
+    const client = new JellyfinClient(source.url, 'token', 'user-1', identity)
+    const gateway = new PlaybackGateway(client)
+    await gateway.start()
+    const url = gateway.register({ upstreamUrl: `${source.url}/loop`, requiredHeaders: { Referer: 'https://alist.example' } })
+    const response = await fetch(url)
+    expect(response.status).toBe(502)
+    expect(await response.text()).toContain('播放网关请求失败')
+    expect(gateway.getDiagnostic(url)?.status).toBe(502)
+    await gateway.dispose()
+  })
 })

@@ -33,6 +33,10 @@ class FakeMpvIpc {
     ['track-list', [
       { id: 1, type: 'audio', 'ff-index': 1 },
       { id: 2, type: 'sub', 'ff-index': 2 },
+      { id: 3, type: 'audio', 'ff-index': 11 },
+      { id: 4, type: 'sub', 'ff-index': 12 },
+      { id: 5, type: 'audio', 'ff-index': 21 },
+      { id: 6, type: 'sub', 'ff-index': 22 },
     ]],
   ])
   eventHandler?: (message: MpvIpcMessage) => void
@@ -248,6 +252,7 @@ describe('Electron main process IPC orchestration', () => {
 
   it('logs in, forwards authenticated API calls, and caches images', async () => {
     mocks.fetchMock
+      .mockResolvedValueOnce(jsonResponse({ app_version: '0.2.4' }))
       .mockResolvedValueOnce(jsonResponse({ ProductName: 'Jellyfin Server', ServerName: 'Test Jellyfin', Version: '10.11.11' }))
       .mockResolvedValueOnce(jsonResponse({ AccessToken: 'token-1', User: { Id: 'user-1', Name: 'Mickey' } }))
       .mockResolvedValueOnce(new Response(Uint8Array.from([1, 2, 3]), { status: 200, headers: { 'content-type': 'image/png' } }))
@@ -259,16 +264,16 @@ describe('Electron main process IPC orchestration', () => {
     })
     expect(result.user).toEqual({ Id: 'user-1', Name: 'Mickey' })
     expect(result.settings).toMatchObject({ connected: true, userId: 'user-1', username: 'mickey', serverVersion: '10.11.11' })
-    const [loginUrl, loginInit] = mocks.fetchMock.mock.calls[1]
+    const [loginUrl, loginInit] = mocks.fetchMock.mock.calls[2]
     expect(loginUrl).toBe('http://media.example.test/Users/AuthenticateByName')
     expect(JSON.parse(loginInit.body)).toEqual({ Username: 'mickey', Pw: 'secret' })
 
     const request = { itemId: 'item-1', imageType: 'Primary', tag: 'tag-1', maxWidth: 480 }
     await expect(handler('jellyfin:get-image')({}, request)).resolves.toBe('data:image/png;base64,AQID')
     await expect(handler('jellyfin:get-image')({}, request)).resolves.toBe('data:image/png;base64,AQID')
-    expect(mocks.fetchMock).toHaveBeenCalledTimes(3)
-    expect(mocks.fetchMock.mock.calls[2][0]).toContain('/Items/item-1/Images/Primary')
-    expect((mocks.fetchMock.mock.calls[2][1].headers as Headers).get('Authorization')).toContain('Token="token-1"')
+    expect(mocks.fetchMock).toHaveBeenCalledTimes(4)
+    expect(mocks.fetchMock.mock.calls[3][0]).toContain('/Items/item-1/Images/Primary')
+    expect((mocks.fetchMock.mock.calls[3][1].headers as Headers).get('Authorization')).toContain('Token="token-1"')
 
     let resolveImage!: (response: Response) => void
     const pendingImage = new Promise<Response>((resolve) => { resolveImage = resolve })
@@ -277,13 +282,13 @@ describe('Electron main process IPC orchestration', () => {
     const first = handler('jellyfin:get-image')({}, concurrentRequest)
     const second = handler('jellyfin:get-image')({}, concurrentRequest)
     await flush()
-    expect(mocks.fetchMock).toHaveBeenCalledTimes(4)
+    expect(mocks.fetchMock).toHaveBeenCalledTimes(5)
     resolveImage(new Response(Uint8Array.from([4, 5, 6]), { status: 200, headers: { 'content-type': 'image/png' } }))
     await expect(Promise.all([first, second])).resolves.toEqual([
       'data:image/png;base64,BAUG',
       'data:image/png;base64,BAUG',
     ])
-    expect(mocks.fetchMock).toHaveBeenCalledTimes(4)
+    expect(mocks.fetchMock).toHaveBeenCalledTimes(5)
   })
 
   it('starts a resumed movie and drives MPV progress and completion events', async () => {
@@ -384,6 +389,49 @@ describe('Electron main process IPC orchestration', () => {
       .filter(([url]) => url.includes('/Sessions/Playing') && !url.includes('/Progress') && !url.includes('/Stopped'))
       .map(([, init]) => JSON.parse(init.body).ItemId)
     expect(switchedPlaying).toContain('episode-1')
+    await handler('playback:command')({}, { sessionId: snapshot.sessionId, command: 'stop' })
+  })
+
+  it('keeps the complete episode queue while resolving each episode with its own source and tracks', async () => {
+    const episodes = [
+      { Id: 'scoped-1', Name: '作用域第一集', Type: 'Episode', SeriesId: 'scoped-series', ParentIndexNumber: 1, IndexNumber: 1, MediaStreams: [{ Type: 'Audio', Index: 11, Language: 'ja' }, { Type: 'Subtitle', Index: 12, Language: 'chi' }] },
+      { Id: 'scoped-2', Name: '作用域第二集', Type: 'Episode', SeriesId: 'scoped-series', ParentIndexNumber: 1, IndexNumber: 2, MediaStreams: [{ Type: 'Audio', Index: 21, Language: 'ja' }, { Type: 'Subtitle', Index: 22, Language: 'chi' }] },
+    ]
+    mocks.fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.includes('/Shows/scoped-series/Episodes')) return jsonResponse({ Items: episodes, TotalRecordCount: episodes.length })
+      const episode = episodes.find((item) => url.includes(`/Items/${item.Id}`))
+      if (episode && url.includes('/PlaybackInfo')) {
+        return jsonResponse({ PlaySessionId: `play-${episode.Id}`, MediaSources: [{ Id: `source-${episode.Id}`, SupportsDirectPlay: true, MediaStreams: episode.MediaStreams }] })
+      }
+      if (episode) return jsonResponse(episode)
+      return new Response(null, { status: 204 })
+    })
+
+    const snapshot = await handler('playback:start')({}, {
+      itemId: 'scoped-2',
+      mediaSourceId: 'source-scoped-2',
+      audioPreference: { index: 21, language: 'ja', title: '日语', codec: 'aac' },
+      subtitlePreference: { index: 22, language: 'chi', title: '中文字幕', codec: 'ass' },
+    })
+    expect(snapshot.queue.map((item) => item.itemId)).toEqual(['scoped-1', 'scoped-2'])
+    const playbackCallsBeforeNext = mocks.fetchMock.mock.calls.filter(([url]) => url.includes('/PlaybackInfo'))
+    expect(playbackCallsBeforeNext).toHaveLength(1)
+    const selectedBody = JSON.parse(playbackCallsBeforeNext[0][1].body)
+    expect(selectedBody).toMatchObject({ MediaSourceId: 'source-scoped-2', AudioStreamIndex: 21, SubtitleStreamIndex: 22 })
+
+    const ipc = mocks.mpvInstances.at(-1)
+    ipc?.emit({ event: 'end-file', reason: 'stop', playlist_entry_id: 2 })
+    ipc?.emit({ event: 'start-file', playlist_entry_id: 1 })
+    ipc?.emit({ event: 'file-loaded' })
+    await flush()
+    await flush()
+    const playbackCallsAfterNext = mocks.fetchMock.mock.calls.filter(([url]) => url.includes('/PlaybackInfo'))
+    expect(playbackCallsAfterNext).toHaveLength(2)
+    const nextBody = JSON.parse(playbackCallsAfterNext[1][1].body)
+    expect(nextBody).not.toHaveProperty('MediaSourceId')
+    expect(nextBody).not.toHaveProperty('AudioStreamIndex')
+    expect(nextBody).not.toHaveProperty('SubtitleStreamIndex')
+    expect((await handler('playback:snapshot')()).queue).toHaveLength(2)
     await handler('playback:command')({}, { sessionId: snapshot.sessionId, command: 'stop' })
   })
 
@@ -497,7 +545,9 @@ describe('Electron main process IPC orchestration', () => {
   })
 
   it('rejects a Jellyfin version outside the supported stable baseline', async () => {
-    mocks.fetchMock.mockResolvedValueOnce(jsonResponse({ ProductName: 'Jellyfin Server', Version: '12.0.0-rc7' }))
+    mocks.fetchMock
+      .mockResolvedValueOnce(jsonResponse({ app_version: '0.2.4' }))
+      .mockResolvedValueOnce(jsonResponse({ ProductName: 'Jellyfin Server', Version: '12.0.0-rc7' }))
     await expect(handler('jellyfin:login')({}, {
       serverUrl: 'media.example.test',
       username: 'mickey',

@@ -18,6 +18,8 @@ import type {
 export type { MediaSourceInfo, PlaybackInfo } from '../src/types'
 
 const REQUEST_TIMEOUT_MS = 15_000
+export const PLAYBACK_INFO_TIMEOUT_MS = 60_000
+const INSPECT_TIMEOUT_MS = 10_000
 const CLIENT_NAME = 'Jellyfin MPV Player'
 const DEVICE_NAME = 'Windows'
 
@@ -35,6 +37,26 @@ interface PublicSystemInfo {
   Version?: string | null
 }
 
+interface MediaWarpVersionInfo {
+  app_version?: string
+  version?: string
+}
+
+export class PlaybackInfoTimeoutError extends Error {
+  readonly code = 'PLAYBACK_INFO_TIMEOUT'
+
+  constructor() {
+    super('播放信息解析超时（60 秒）')
+    this.name = 'PlaybackInfoTimeoutError'
+  }
+}
+
+export function isAbortError(error: unknown): boolean {
+  return (typeof DOMException !== 'undefined' && error instanceof DOMException)
+    ? error.name === 'AbortError'
+    : Boolean(error && typeof error === 'object' && 'name' in error && (error as { name?: unknown }).name === 'AbortError')
+}
+
 export function jellyfinLabel(): string {
   return 'Jellyfin'
 }
@@ -50,6 +72,16 @@ function parseVersion(version: string): [number, number] | undefined {
   return [Number(match[1]), Number(match[2])]
 }
 
+function isVersionAtLeast(version: string, minimum: [number, number, number]): boolean {
+  const match = version.trim().match(/^v?(\d+)\.(\d+)(?:\.(\d+))?/)
+  if (!match) return false
+  const actual = [Number(match[1]), Number(match[2]), Number(match[3] || 0)]
+  for (let index = 0; index < minimum.length; index += 1) {
+    if (actual[index] !== minimum[index]) return actual[index] > minimum[index]
+  }
+  return true
+}
+
 export function identifyJellyfin(info: PublicSystemInfo): JellyfinIdentity {
   const productName = typeof info.ProductName === 'string' ? info.ProductName.trim() : ''
   const version = typeof info.Version === 'string' ? info.Version.trim() : ''
@@ -60,7 +92,7 @@ export function identifyJellyfin(info: PublicSystemInfo): JellyfinIdentity {
   }
   const parsed = parseVersion(version)
   if (!parsed || parsed[0] !== 10 || parsed[1] !== 11) {
-    throw new Error(`当前 Jellyfin 版本为 ${version}，Jellyfin MPV Player 1.0.0 需要 Jellyfin 10.11.x`)
+    throw new Error(`当前 Jellyfin 版本为 ${version}，Jellyfin MPV Player 1.0.4 需要 Jellyfin 10.11.x`)
   }
   return { name: info.ServerName?.trim() || 'Jellyfin Server', version }
 }
@@ -130,25 +162,51 @@ export class JellyfinClient {
     this.deviceId = deviceId
   }
 
-  static async inspect(baseUrl: string): Promise<{ baseUrl: string; identity: JellyfinIdentity }> {
+  static async inspect(baseUrl: string): Promise<{ baseUrl: string; identity: JellyfinIdentity; mediaWarpVersion: string }> {
     const normalizedUrl = normalizeServerUrl(baseUrl)
-    let response: Response
+    let mediaWarpResponse: Response
     try {
-      response = await fetch(`${normalizedUrl}/System/Info/Public`, { headers: { Accept: 'application/json' } })
+      mediaWarpResponse = await fetch(`${normalizedUrl}/MediaWarp/version`, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(INSPECT_TIMEOUT_MS) })
     } catch (error) {
       throw new Error(`无法连接媒体服务器：${error instanceof Error ? error.message : String(error)}`)
     }
-    if (!response.ok) {
-      throw new Error(`无法连接媒体服务器（${response.status}）：${response.statusText}`)
+    if (!mediaWarpResponse.ok) {
+      let directInfo: PublicSystemInfo | undefined
+      try {
+        const response = await fetch(`${normalizedUrl}/System/Info/Public`, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(INSPECT_TIMEOUT_MS) })
+        if (response.ok) directInfo = await response.json() as PublicSystemInfo
+      } catch {
+        // Preserve the MediaWarp-specific error below when the endpoint is not a Jellyfin server.
+      }
+      if (directInfo && /jellyfin/i.test(typeof directInfo.ProductName === 'string' ? directInfo.ProductName : '')) {
+        throw new Error('当前地址绕过 MediaWarp，请填写 MediaWarp 根地址，例如 http://主机:9000')
+      }
+      throw new Error(`当前地址不是可用的 MediaWarp 服务（${mediaWarpResponse.status}）`)
     }
+    let mediaWarp: MediaWarpVersionInfo
+    try {
+      mediaWarp = await mediaWarpResponse.json() as MediaWarpVersionInfo
+    } catch {
+      throw new Error('MediaWarp 版本信息格式无效')
+    }
+    const mediaWarpVersion = typeof mediaWarp.app_version === 'string' ? mediaWarp.app_version.trim() : typeof mediaWarp.version === 'string' ? mediaWarp.version.trim() : ''
+    if (!mediaWarpVersion || !isVersionAtLeast(mediaWarpVersion, [0, 2, 4])) {
+      throw new Error(`MediaWarp 版本 ${mediaWarpVersion || '未知'} 过低，需要 0.2.4 或更新版本`)
+    }
+    let response: Response
+    try {
+      response = await fetch(`${normalizedUrl}/System/Info/Public`, { headers: { Accept: 'application/json' }, signal: AbortSignal.timeout(INSPECT_TIMEOUT_MS) })
+    } catch (error) {
+      throw new Error(`无法连接 Jellyfin：${error instanceof Error ? error.message : String(error)}`)
+    }
+    if (!response.ok) throw new Error(`无法读取 Jellyfin 公开信息（${response.status}）：${response.statusText}`)
     let info: PublicSystemInfo
     try {
       info = await response.json() as PublicSystemInfo
     } catch {
-      throw new Error('媒体服务器返回的公开信息格式无效')
+      throw new Error('Jellyfin 返回的公开信息格式无效')
     }
-    const finalUrl = response.url.replace(/\/System\/Info\/Public\/?$/i, '') || normalizedUrl
-    return { baseUrl: normalizeServerUrl(finalUrl), identity: identifyJellyfin(info) }
+    return { baseUrl: normalizedUrl, identity: identifyJellyfin(info), mediaWarpVersion }
   }
 
   static async authenticate(baseUrl: string, username: string, password: string, identity: JellyfinIdentity, deviceId = 'jellyfin-mpv-player'): Promise<AuthResponse & { identity: JellyfinIdentity; baseUrl: string }> {
@@ -164,7 +222,7 @@ export class JellyfinClient {
     return { ...result, identity, baseUrl: client.baseUrl }
   }
 
-  async request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  async request<T>(path: string, init: RequestInit = {}, options: { timeoutMs?: number; signal?: AbortSignal; timeoutError?: Error } = {}): Promise<T> {
     const method = init.method || 'GET'
     const endpoint = path.split('?')[0]
     const startedAt = Date.now()
@@ -174,15 +232,21 @@ export class JellyfinClient {
     this.setAuthorization(headers)
 
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS)
+    const timeoutMs = options.timeoutMs || REQUEST_TIMEOUT_MS
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    const onAbort = () => controller.abort()
+    options.signal?.addEventListener('abort', onAbort, { once: true })
     let response: Response
     try {
-      response = await fetch(this.resolveUrl(path), { ...init, headers, signal: init.signal || controller.signal })
+      response = await fetch(this.resolveUrl(path), { ...init, headers, signal: controller.signal })
     } catch (error) {
       logger.error('jellyfin', 'request-failed', error, { method, endpoint, durationMs: Date.now() - startedAt })
+      if (options.signal?.aborted) throw error
+      if (options.timeoutError && (controller.signal.aborted || isAbortError(error))) throw options.timeoutError
       throw error
     } finally {
       clearTimeout(timer)
+      options.signal?.removeEventListener('abort', onAbort)
     }
     if (!response.ok) {
       const body = await response.text().catch(() => '')
@@ -311,7 +375,7 @@ export class JellyfinClient {
     return this.request(`/Users/${encodeURIComponent(this.userId)}/Items/${encodeURIComponent(itemId)}?${params.toString()}`)
   }
 
-  async getPlaybackInfo(itemId: string, options: PlaybackInfoRequest = {}): Promise<PlaybackInfo> {
+  async getPlaybackInfo(itemId: string, options: PlaybackInfoRequest = {}, signal?: AbortSignal): Promise<PlaybackInfo> {
     const body = {
       UserId: this.userId,
       DeviceProfile: {
@@ -345,7 +409,7 @@ export class JellyfinClient {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
-    })
+    }, { timeoutMs: PLAYBACK_INFO_TIMEOUT_MS, signal, timeoutError: new PlaybackInfoTimeoutError() })
     return parsePlaybackInfo(value)
   }
 

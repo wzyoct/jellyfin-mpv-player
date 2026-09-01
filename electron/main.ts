@@ -3,13 +3,13 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { JellyfinClient, normalizeServerUrl, type MediaSourceInfo, type PlaybackInfo } from './jellyfinClient'
+import { JellyfinClient, isAbortError, normalizeServerUrl, type MediaSourceInfo, type PlaybackInfo } from './jellyfinClient'
 import { PlaybackGateway } from './playbackGateway'
 import { MpvIpc, type MpvIpcMessage } from './mpvIpc'
 import { normalizeMpvPath } from './mpvPath'
 import { logger } from './logger'
 import { buildEpisodeQueue } from '../src/playbackQueue'
-import { buildHexPlaylistUrl, mapWithConcurrency } from './playbackPlaylist'
+import { buildHexPlaylistUrl } from './playbackPlaylist'
 import { chooseDefaultSubtitle } from '../src/subtitlePreference'
 import { isResumePositionReached, resolveResumeTicks } from './playbackLogic'
 import { formatPlaybackLoadError } from './playbackError'
@@ -38,6 +38,7 @@ interface StoredSettings {
   userId?: string
   serverName?: string
   serverVersion?: string
+  mediaWarpVersion?: string
   encryptedToken?: string
   mpvPath: string
   deviceId: string
@@ -45,8 +46,8 @@ interface StoredSettings {
 
 interface PlaybackEntry extends PlaybackQueueItem {
   item: MediaItem
-  source: MediaSourceInfo
-  playbackInfo: PlaybackInfo
+  source?: MediaSourceInfo
+  playbackInfo?: PlaybackInfo
   positionSeconds: number
   durationSeconds?: number
   positionFresh: boolean
@@ -56,7 +57,7 @@ interface PlaybackEntry extends PlaybackQueueItem {
   subtitleStreamIndex?: number
   finalized: boolean
   initialResumeTicks: number
-  routeKind: PlaybackRoute['kind']
+  routeKind?: PlaybackRoute['kind']
   gatewayUrl?: string
   playlistEntryIds: number[]
   playlistIndexes: number[]
@@ -64,6 +65,8 @@ interface PlaybackEntry extends PlaybackQueueItem {
   activePlaylistIndex?: number
   loaded: boolean
   subtitleRoute?: SubtitleRoute
+  preparing?: Promise<PlaybackEntry>
+  preparationError?: string
 }
 
 interface PlaybackSession {
@@ -96,30 +99,21 @@ interface PlaybackSession {
   audioPreference?: AudioPreference
   subtitlePreference?: SubtitlePreference
   mediaSourceId?: string
+  selectedItemId: string
+  abortController: AbortController
   gateway: PlaybackGateway
-}
-
-interface PreparedEntry {
-  index: number
-  item: MediaItem
-  entry: PlaybackEntry
-}
-
-interface FailedEntry {
-  index: number
-  item: MediaItem
-  error: string
 }
 
 let mainWindow: BrowserWindow | null = null
 let settingsPath = ''
 let storedSettings: StoredSettings = {
-  serverUrl: 'http://127.0.0.1:8096',
+  serverUrl: 'http://127.0.0.1:9000',
   username: '',
   mpvPath: 'mpv.exe',
   deviceId: randomUUID(),
 }
 let jellyfinClient: JellyfinClient | null = null
+let connectionError: string | undefined
 let activeSession: PlaybackSession | null = null
 let revisionCounter = 0
 let lastSnapshot: PlaybackSnapshot = {
@@ -197,6 +191,8 @@ function publicSettings() {
     userId: storedSettings.userId,
     serverName: storedSettings.serverName,
     serverVersion: storedSettings.serverVersion,
+    mediaWarpVersion: storedSettings.mediaWarpVersion,
+    connectionError,
     mpvPath: storedSettings.mpvPath || 'mpv.exe',
     connected: Boolean(jellyfinClient),
     secureStorageAvailable: safeStorage.isEncryptionAvailable(),
@@ -243,19 +239,24 @@ function testMpvPath(candidate?: string): { valid: boolean; path: string; versio
   return { ...validation, message: 'MPV 测试启动成功' }
 }
 
-function restoreClient(): void {
+async function restoreClient(): Promise<void> {
   const token = decryptToken()
-  if (token && storedSettings.userId) {
-    try {
-      const identity: JellyfinIdentity = {
-        name: storedSettings.serverName || 'Jellyfin Server',
-        version: storedSettings.serverVersion || '10.11.x',
-      }
-      jellyfinClient = new JellyfinClient(storedSettings.serverUrl, token, storedSettings.userId, identity, storedSettings.deviceId)
-    } catch (error) {
-      jellyfinClient = null
-      logger.error('jellyfin', 'restore-client-failed', error)
-    }
+  if (!token || !storedSettings.userId) return
+  try {
+    const inspected = await JellyfinClient.inspect(storedSettings.serverUrl)
+    const identity: JellyfinIdentity = inspected.identity
+    jellyfinClient = new JellyfinClient(inspected.baseUrl, token, storedSettings.userId, identity, storedSettings.deviceId)
+    storedSettings.serverUrl = inspected.baseUrl
+    storedSettings.serverName = identity.name
+    storedSettings.serverVersion = identity.version
+    storedSettings.mediaWarpVersion = inspected.mediaWarpVersion
+    connectionError = undefined
+    persistSettings()
+    logger.info('jellyfin', 'restore-client-success', { mediaWarpVersion: inspected.mediaWarpVersion, jellyfinVersion: identity.version })
+  } catch (error) {
+    jellyfinClient = null
+    connectionError = error instanceof Error ? error.message : '无法验证 MediaWarp 连接'
+    logger.warn('jellyfin', 'restore-client-failed', { message: connectionError })
   }
 }
 
@@ -290,55 +291,78 @@ async function buildQueue(client: JellyfinClient, itemId: string): Promise<{ ite
   return buildEpisodeQueue(episodes, selected)
 }
 
-function chooseAudio(streams: MediaStream[], preference?: AudioPreference): number | undefined {
-  if (preference?.index !== undefined) {
-    return streams.some((stream) => stream.Type === 'Audio' && stream.Index === preference.index)
-      ? preference.index
-      : undefined
+function chooseAudio(streams: MediaStream[], preference?: AudioPreference, strictIndex = false): number | undefined {
+  if (preference?.index !== undefined && strictIndex) {
+    return streams.some((stream) => stream.Type === 'Audio' && stream.Index === preference.index) ? preference.index : undefined
   }
   const language = preference?.language?.toLowerCase()
   const title = preference?.title?.toLowerCase()
-  return streams.find((stream) => stream.Type === 'Audio' && language && (stream.Language || stream.DisplayLanguage || '').toLowerCase() === language)?.Index
+  const codec = preference?.codec?.toLowerCase()
+  return streams.find((stream) => stream.Type === 'Audio' && language && (stream.Language || stream.DisplayLanguage || '').toLowerCase() === language && (!codec || (stream.Codec || '').toLowerCase() === codec))?.Index
+    ?? streams.find((stream) => stream.Type === 'Audio' && title && (stream.Title || stream.DisplayTitle || '').toLowerCase().includes(title) && (!codec || (stream.Codec || '').toLowerCase() === codec))?.Index
+    ?? streams.find((stream) => stream.Type === 'Audio' && language && (stream.Language || stream.DisplayLanguage || '').toLowerCase() === language)?.Index
     ?? streams.find((stream) => stream.Type === 'Audio' && title && (stream.Title || stream.DisplayTitle || '').toLowerCase().includes(title))?.Index
     ?? streams.find((stream) => stream.Type === 'Audio' && stream.IsDefault)?.Index
     ?? streams.find((stream) => stream.Type === 'Audio')?.Index
 }
 
-function chooseSubtitle(streams: MediaStream[], preference?: SubtitlePreference): number | undefined {
+function chooseSubtitle(streams: MediaStream[], preference?: SubtitlePreference, strictIndex = false): number | undefined {
   if (preference?.disabled) return undefined
-  if (preference?.index !== undefined) {
-    return streams.some((stream) => stream.Type === 'Subtitle' && stream.Index === preference.index)
-      ? preference.index
-      : undefined
+  if (preference?.index !== undefined && strictIndex) {
+    return streams.some((stream) => stream.Type === 'Subtitle' && stream.Index === preference.index) ? preference.index : undefined
   }
-  return chooseDefaultSubtitle(streams)
+  const language = preference?.language?.toLowerCase()
+  const title = preference?.title?.toLowerCase()
+  const codec = preference?.codec?.toLowerCase()
+  return streams.find((stream) => stream.Type === 'Subtitle' && language && (stream.Language || stream.DisplayLanguage || '').toLowerCase() === language && (!codec || (stream.Codec || '').toLowerCase() === codec))?.Index
+    ?? streams.find((stream) => stream.Type === 'Subtitle' && title && (stream.Title || stream.DisplayTitle || '').toLowerCase().includes(title) && (!codec || (stream.Codec || '').toLowerCase() === codec))?.Index
+    ?? streams.find((stream) => stream.Type === 'Subtitle' && language && (stream.Language || stream.DisplayLanguage || '').toLowerCase() === language)?.Index
+    ?? streams.find((stream) => stream.Type === 'Subtitle' && title && (stream.Title || stream.DisplayTitle || '').toLowerCase().includes(title))?.Index
+    ?? chooseDefaultSubtitle(streams)
+}
+
+function createLogicalEntry(item: MediaItem, startTimeTicks = 0): PlaybackEntry {
+  return {
+    ...queueItem(item),
+    item,
+    positionSeconds: Math.max(0, startTimeTicks / 10_000_000),
+    positionFresh: false,
+    positionObserved: false,
+    isPaused: false,
+    finalized: false,
+    initialResumeTicks: Math.max(0, startTimeTicks),
+    playlistEntryIds: [],
+    playlistIndexes: [],
+    loaded: false,
+  }
 }
 
 async function prepareEntry(session: PlaybackSession, item: MediaItem, startTimeTicks = 0): Promise<PlaybackEntry> {
   const client = getClient()
+  const isSelected = item.Id === session.selectedItemId
   const requestedStreams = item.MediaStreams || []
   const playbackRequest: PlaybackInfoRequest = {
-    mediaSourceId: session.mediaSourceId,
-    audioStreamIndex: chooseAudio(requestedStreams, session.audioPreference),
-    subtitleStreamIndex: chooseSubtitle(requestedStreams, session.subtitlePreference),
+    ...(isSelected && session.mediaSourceId ? { mediaSourceId: session.mediaSourceId } : {}),
+    ...(isSelected && session.audioPreference?.index !== undefined ? { audioStreamIndex: session.audioPreference.index } : {}),
+    ...(isSelected && !session.subtitlePreference?.disabled && session.subtitlePreference?.index !== undefined ? { subtitleStreamIndex: session.subtitlePreference.index } : {}),
     startTimeTicks,
   }
-  const playbackInfo = await client.getPlaybackInfo(item.Id, playbackRequest)
+  const playbackInfo = await client.getPlaybackInfo(item.Id, playbackRequest, session.abortController.signal)
   const sources = playbackInfo.MediaSources || []
   if (!sources.length) throw new Error(`《${item.Name}》没有可用的视频源`)
-  const requestedSource = session.mediaSourceId ? sources.find((candidate) => candidate.Id === session.mediaSourceId) : undefined
-  if (session.mediaSourceId && !requestedSource) throw new Error(`《${item.Name}》没有找到指定媒体源`)
+  const requestedSource = isSelected && session.mediaSourceId ? sources.find((candidate) => candidate.Id === session.mediaSourceId) : undefined
+  if (isSelected && session.mediaSourceId && !requestedSource) throw new Error(`《${item.Name}》没有找到指定媒体源`)
   const source = requestedSource
     || sources.find((candidate) => candidate.SupportsDirectPlay)
     || sources.find((candidate) => candidate.SupportsDirectStream)
     || sources[0]
   const streams = (source.MediaStreams || item.MediaStreams || []) as MediaStream[]
-  const audioStreamIndex = chooseAudio(streams, session.audioPreference)
-  const subtitleStreamIndex = chooseSubtitle(streams, session.subtitlePreference)
-  if (session.audioPreference?.index !== undefined && audioStreamIndex === undefined) {
+  const audioStreamIndex = chooseAudio(streams, session.audioPreference, isSelected)
+  const subtitleStreamIndex = chooseSubtitle(streams, session.subtitlePreference, isSelected)
+  if (isSelected && session.audioPreference?.index !== undefined && audioStreamIndex === undefined) {
     throw new Error(`《${item.Name}》未找到用户指定的音轨 ${session.audioPreference.index}`)
   }
-  if (!session.subtitlePreference?.disabled && session.subtitlePreference?.index !== undefined && subtitleStreamIndex === undefined) {
+  if (isSelected && !session.subtitlePreference?.disabled && session.subtitlePreference?.index !== undefined && subtitleStreamIndex === undefined) {
     throw new Error(`《${item.Name}》未找到用户指定的字幕轨道 ${session.subtitlePreference.index}`)
   }
   const subtitle = subtitleStreamIndex === undefined ? undefined : streams.find((stream) => stream.Type === 'Subtitle' && stream.Index === subtitleStreamIndex)
@@ -348,22 +372,14 @@ async function prepareEntry(session: PlaybackSession, item: MediaItem, startTime
     playSessionId: playbackInfo.PlaySessionId,
   })
   return {
-    ...queueItem(item),
-    item,
+    ...createLogicalEntry(item, startTimeTicks),
     source,
     playbackInfo,
-    positionSeconds: Math.max(0, startTimeTicks / 10_000_000),
-    positionFresh: false,
-    positionObserved: false,
-    isPaused: false,
     audioStreamIndex,
     subtitleStreamIndex,
-    finalized: false,
-    initialResumeTicks: Math.max(0, startTimeTicks),
     routeKind: route.kind,
     playlistEntryIds: [],
     playlistIndexes: [],
-    loaded: false,
     subtitleRoute: subtitle && subtitleStreamIndex !== undefined ? {
       deliveryMethod: subtitle.DeliveryMethod || (subtitle.IsExternal ? 'External' : 'Embed'),
       deliveryUrl: subtitle.DeliveryUrl,
@@ -372,6 +388,28 @@ async function prepareEntry(session: PlaybackSession, item: MediaItem, startTime
       isExternal: Boolean(subtitle.IsExternal || subtitle.IsExternalUrl),
     } : undefined,
   }
+}
+
+async function ensureEntryPrepared(session: PlaybackSession, entry: PlaybackEntry): Promise<PlaybackEntry> {
+  if (entry.source && entry.playbackInfo && entry.routeKind) return entry
+  if (entry.preparing) return entry.preparing
+  entry.preparationError = undefined
+  const promise = prepareEntry(session, entry.item, entry.initialResumeTicks)
+    .then((prepared) => {
+      const playlistEntryIds = entry.playlistEntryIds
+      const playlistIndexes = entry.playlistIndexes
+      const gatewayUrl = entry.gatewayUrl
+      Object.assign(entry, prepared, { playlistEntryIds, playlistIndexes, gatewayUrl, preparing: undefined })
+      logger.info('playback', 'entry-prepared', { sessionId: session.sessionId, itemId: entry.itemId, queueIndex: session.queue.findIndex((item) => item.itemId === entry.itemId), routeKind: entry.routeKind })
+      return entry
+    })
+    .catch((error) => {
+      entry.preparing = undefined
+      entry.preparationError = error instanceof Error ? error.message : '读取播放信息失败'
+      throw error
+    })
+  entry.preparing = promise
+  return promise
 }
 
 function snapshotFor(session: PlaybackSession | null): PlaybackSnapshot {
@@ -407,6 +445,7 @@ function emitPlayback(type: PlaybackEvent['type'], session: PlaybackSession | nu
 }
 
 function reportPayload(session: PlaybackSession, entry: PlaybackEntry, eventName?: PlaybackProgressEvent, playlistIndex = session.currentIndex): PlaybackReportPayload {
+  if (!entry.source || !entry.playbackInfo || !entry.routeKind) throw new Error(`《${entry.name}》播放资源尚未准备好`)
   return {
     ItemId: entry.itemId,
     MediaSourceId: entry.source.Id,
@@ -515,6 +554,7 @@ async function finishSession(session: PlaybackSession, reason: string, terminate
   session.finalizePromise = (async () => {
     session.phase = 'stopping'
     session.endReason = reason
+    session.abortController.abort()
     emitPlayback('snapshot', session)
     clearInterval(session.progressTimer)
     try {
@@ -535,28 +575,35 @@ async function finishSession(session: PlaybackSession, reason: string, terminate
 }
 
 function registerPlaybackRoute(session: PlaybackSession, entry: PlaybackEntry): string {
-  const route = getClient().buildPlaybackRoute(entry.itemId, entry.source, {
-    audioStreamIndex: entry.audioStreamIndex,
-    subtitleStreamIndex: entry.subtitleStreamIndex,
-    playSessionId: entry.playbackInfo.PlaySessionId,
-  })
-  if (route.kind !== entry.routeKind) throw new Error(`《${entry.name}》播放路由状态不一致`)
-  let host = 'unknown'
-  try { host = new URL(route.upstreamUrl).hostname } catch { /* validated by the gateway */ }
-  const gatewayUrl = session.gateway.register({ upstreamUrl: route.upstreamUrl, requiredHeaders: route.requiredHttpHeaders })
+  if (entry.gatewayUrl) return entry.gatewayUrl
+  const gatewayUrl = session.gateway.register({ resolve: async () => {
+    const prepared = await ensureEntryPrepared(session, entry)
+    if (!prepared.source || !prepared.playbackInfo) throw new Error(`《${entry.name}》播放资源尚未准备好`)
+    const route = getClient().buildPlaybackRoute(prepared.itemId, prepared.source, {
+      audioStreamIndex: prepared.audioStreamIndex,
+      subtitleStreamIndex: prepared.subtitleStreamIndex,
+      playSessionId: prepared.playbackInfo.PlaySessionId,
+    })
+    if (prepared.routeKind && route.kind !== prepared.routeKind) throw new Error(`《${entry.name}》播放路由状态不一致`)
+    prepared.routeKind = route.kind
+    let host = 'unknown'
+    try { host = new URL(route.upstreamUrl).hostname } catch { /* validated by the gateway */ }
+    logger.info('playback', 'route-resolved', {
+      sessionId: session.sessionId,
+      itemId: prepared.itemId,
+      kind: route.kind,
+      host,
+      mediaSourceId: route.mediaSourceId,
+      hasDirectStreamUrl: Boolean(prepared.source.DirectStreamUrl),
+      hasTranscodingUrl: Boolean(prepared.source.TranscodingUrl),
+      supportsDirectPlay: Boolean(prepared.source.SupportsDirectPlay),
+      supportsDirectStream: Boolean(prepared.source.SupportsDirectStream),
+      requiredHeaderCount: Object.keys(route.requiredHttpHeaders).length,
+    })
+    return { upstreamUrl: route.upstreamUrl, requiredHeaders: route.requiredHttpHeaders }
+  }})
   entry.gatewayUrl = gatewayUrl
-  logger.info('playback', 'route-registered', {
-    sessionId: session.sessionId,
-    itemId: entry.itemId,
-    kind: route.kind,
-    host,
-    mediaSourceId: route.mediaSourceId,
-    hasDirectStreamUrl: Boolean(entry.source.DirectStreamUrl),
-    hasTranscodingUrl: Boolean(entry.source.TranscodingUrl),
-    supportsDirectPlay: Boolean(entry.source.SupportsDirectPlay),
-    supportsDirectStream: Boolean(entry.source.SupportsDirectStream),
-    requiredHeaderCount: Object.keys(route.requiredHttpHeaders).length,
-  })
+  logger.info('playback', 'route-registered', { sessionId: session.sessionId, itemId: entry.itemId, queueIndex: session.queue.findIndex((item) => item.itemId === entry.itemId) })
   return gatewayUrl
 }
 
@@ -583,6 +630,8 @@ async function seekEntry(session: PlaybackSession, entry: PlaybackEntry, startTi
 
 async function activateLoadedEntry(session: PlaybackSession, entry: PlaybackEntry): Promise<void> {
   if (entry.loaded || session.stopped) return
+  await ensureEntryPrepared(session, entry)
+  if (!entry.source || !entry.playbackInfo || !entry.routeKind) throw new Error(`《${entry.name}》播放资源尚未准备好`)
   entry.loaded = true
   if (entry.initialResumeTicks > 0) await seekEntry(session, entry, entry.initialResumeTicks)
   if (entry.subtitleRoute) {
@@ -625,6 +674,23 @@ async function activateLoadedEntry(session: PlaybackSession, entry: PlaybackEntr
   session.phase = 'playing'
   logger.info('playback', 'playing', { sessionId: session.sessionId, itemId: entry.itemId, index: session.currentIndex })
   emitPlayback('snapshot', session)
+  void prefetchNextEntry(session)
+}
+
+async function prefetchNextEntry(session: PlaybackSession): Promise<void> {
+  const nextIndex = session.currentIndex + 1
+  if (session.stopped || nextIndex >= session.queue.length || session.stopAfterCurrent || session.playlistTrimmed) return
+  const entry = session.entries.get(nextIndex)
+  if (!entry || entry.source) return
+  const startedAt = Date.now()
+  try {
+    await ensureEntryPrepared(session, entry)
+    logger.info('playback', 'entry-prefetched', { sessionId: session.sessionId, itemId: entry.itemId, queueIndex: nextIndex, durationMs: Date.now() - startedAt })
+  } catch (error) {
+    if (session.stopped || isAbortError(error)) return
+    entry.preparationError = error instanceof Error ? error.message : '读取播放信息失败'
+    logger.warn('playback', 'entry-prefetch-failed', { sessionId: session.sessionId, itemId: entry.itemId, queueIndex: nextIndex, durationMs: Date.now() - startedAt })
+  }
 }
 
 function setPlaylistEntryIds(entry: PlaybackEntry, ids: number[]): void {
@@ -773,6 +839,21 @@ async function handleEndFile(session: PlaybackSession, message: MpvIpcMessage): 
       gatewayRedirects: diagnostic?.redirects,
     })
     session.syncError = formatPlaybackLoadError(entry.name, message.file_error, diagnostic, reason)
+    const hasNext = queueIndex !== undefined && queueIndex + 1 < session.queue.length && !session.stopAfterCurrent && !session.playlistTrimmed
+    if (hasNext && !session.startupPending) {
+      entry.preparationError = session.syncError
+      entry.finalized = true
+      session.queueWarnings.push({ itemId: entry.itemId, label: entry.name, reason: session.syncError })
+      session.syncError = undefined
+      emitPlayback('snapshot', session, `${entry.name} 播放失败，已跳过`)
+      const nextEntry = queueIndex === undefined ? undefined : session.entries.get(queueIndex + 1)
+      const nextPlaylistIndex = nextEntry ? firstPlaylistIndex(nextEntry) : undefined
+      if (nextPlaylistIndex !== undefined) {
+        session.pendingTransition = true
+        await session.ipc.send(['playlist-play-index', nextPlaylistIndex]).catch(() => undefined)
+      }
+      return
+    }
     await finishSession(session, 'error', true)
     if (!session.startupPending) emitPlayback('error', session, session.syncError)
     return
@@ -905,32 +986,26 @@ async function startPlayback(request: StartPlaybackRequest): Promise<PlaybackSna
     startupPending: true,
     audioPreference: request.audioPreference,
     subtitlePreference: request.subtitlePreference,
+    selectedItemId: request.itemId,
+    abortController: new AbortController(),
     gateway: new PlaybackGateway(client),
   }
   session.mediaSourceId = request.mediaSourceId
-  const prepared = await mapWithConcurrency<MediaItem, PreparedEntry | FailedEntry>(queuePlan.items, 4, async (item, index) => {
-    try {
-      const entry = await prepareEntry(session, item, index === queuePlan.startIndex ? resolveResumeTicks(item, request.startTimeTicks) : 0)
-      return { index, item, entry }
-    } catch (error) {
-      return { index, item, error: error instanceof Error ? error.message : '读取播放信息失败' }
-    }
+  session.queue = queuePlan.items.map(queueItem)
+  session.currentIndex = queuePlan.startIndex
+  queuePlan.items.forEach((item, index) => {
+    const resumeTicks = index === queuePlan.startIndex ? resolveResumeTicks(item, request.startTimeTicks) : 0
+    session.entries.set(index, createLogicalEntry(item, resumeTicks))
   })
-  const selectedResult = prepared.find((result) => result.index === queuePlan.startIndex)
-  if (!selectedResult || !('entry' in selectedResult)) throw new Error(`当前剧集《${queuePlan.items[queuePlan.startIndex]?.Name || request.itemId}》无法播放：${selectedResult && 'error' in selectedResult ? selectedResult.error : '读取播放信息失败'}`)
-  const selectedEntry = selectedResult.entry
-  const playable = prepared.filter((result): result is PreparedEntry => {
-    if (!('entry' in result)) {
-      session.queueWarnings.push({ itemId: result.item.Id, label: result.item.Name, reason: result.error })
-      return false
-    }
-    return true
-  })
-  const selectedPlayable = playable.findIndex((result) => result.index === queuePlan.startIndex)
-  if (selectedPlayable < 0) throw new Error('当前剧集无法加入播放列表')
-  session.queue = playable.map((result) => queueItem(result.item))
-  session.currentIndex = selectedPlayable
-  playable.forEach((result, index) => session.entries.set(index, { ...result.entry, initialResumeTicks: result.entry.positionSeconds * 10_000_000, loaded: false }))
+  const selectedEntry = session.entries.get(queuePlan.startIndex)
+  if (!selectedEntry) throw new Error('当前剧集无法加入播放列表')
+  const preparationStartedAt = Date.now()
+  try {
+    await ensureEntryPrepared(session, selectedEntry)
+    logger.info('playback', 'current-entry-ready', { sessionId: session.sessionId, itemId: selectedEntry.itemId, queueLength: session.queue.length, durationMs: Date.now() - preparationStartedAt })
+  } catch (error) {
+    throw new Error(`当前剧集《${selectedEntry.name}》无法播放：${error instanceof Error ? error.message : '读取播放信息失败'}`)
+  }
   const args = [
     '--idle=yes',
     '--pause=yes',
@@ -981,7 +1056,7 @@ async function startPlayback(request: StartPlaybackRequest): Promise<PlaybackSna
   try {
     await session.gateway.start()
     await attachMpvIpc(session)
-    const playlistUrl = buildHexPlaylistUrl(playable.map((result) => ({ item: queueItem(result.item), url: registerPlaybackRoute(session, result.entry) })))
+    const playlistUrl = buildHexPlaylistUrl([...session.entries.entries()].map(([, entry]) => ({ item: entry, url: registerPlaybackRoute(session, entry) })))
     await session.ipc.setProperty('pause', true)
     await session.ipc.setProperty('http-header-fields', [])
     await session.ipc.send(['keybind', 'MBTN_RIGHT', 'script-binding', 'select/select-playlist'])
@@ -989,14 +1064,14 @@ async function startPlayback(request: StartPlaybackRequest): Promise<PlaybackSna
     await session.ipc.send(['loadlist', playlistUrl, 'append'])
     await refreshPlaylistMap(session, true)
     session.playlistReady = true
-    const selectedPlaylistEntry = session.entries.get(selectedPlayable)
+    const selectedPlaylistEntry = session.entries.get(queuePlan.startIndex)
     if (!selectedPlaylistEntry) throw new Error('无法定位当前剧集在 MPV 播放列表中的位置')
     const selectedPlaylistIndex = firstPlaylistIndex(selectedPlaylistEntry)
     if (selectedPlaylistIndex === undefined) throw new Error('无法定位当前剧集在 MPV 播放列表中的位置')
     const loaded = session.ipc.waitForEvent((message) => {
       if (message.event === 'end-file' && message.reason === 'redirect') return false
       return message.event === 'file-loaded' || message.event === 'end-file' || message.event === 'ipc-closed'
-    })
+    }, 60_000)
     await session.ipc.send(['playlist-play-index', selectedPlaylistIndex])
     const loadEvent = await loaded
     if (loadEvent.event !== 'file-loaded') {
@@ -1134,32 +1209,43 @@ function registerIpc(): void {
       storedSettings.userId = undefined
       storedSettings.serverName = undefined
       storedSettings.serverVersion = undefined
+      storedSettings.mediaWarpVersion = undefined
       storedSettings.encryptedToken = undefined
+      connectionError = undefined
       imageCache.clear()
       inFlightImageRequests.clear()
     }
     storedSettings.serverUrl = nextUrl
     storedSettings.username = requireText(input?.username, '用户名')
     storedSettings.mpvPath = normalizeMpvPath(requireText(input?.mpvPath || storedSettings.mpvPath, 'MPV 路径'))
+    connectionError = undefined
     persistSettings()
     return publicSettings()
   })
   ipcMain.handle('jellyfin:login', async (_event, input: { serverUrl: string; username: string; password: string; mpvPath: string }) => {
-    const inspected = await JellyfinClient.inspect(requireText(input?.serverUrl, '服务器地址'))
-    const username = requireText(input?.username, '用户名')
-    const result = await JellyfinClient.authenticate(inspected.baseUrl, username, typeof input?.password === 'string' ? input.password : '', inspected.identity, storedSettings.deviceId)
-    storedSettings.serverUrl = result.baseUrl
-    storedSettings.username = username
-    storedSettings.userId = result.User.Id
-    storedSettings.serverName = result.identity.name
-    storedSettings.serverVersion = result.identity.version
-    storedSettings.mpvPath = normalizeMpvPath(requireText(input?.mpvPath || storedSettings.mpvPath, 'MPV 路径'))
-    storedSettings.encryptedToken = safeStorage.isEncryptionAvailable()
-      ? safeStorage.encryptString(result.AccessToken).toString('base64')
-      : undefined
-    jellyfinClient = new JellyfinClient(result.baseUrl, result.AccessToken, result.User.Id, result.identity, storedSettings.deviceId)
-    persistSettings()
-    return { settings: publicSettings(), user: result.User }
+    try {
+      const inspected = await JellyfinClient.inspect(requireText(input?.serverUrl, '服务器地址'))
+      const username = requireText(input?.username, '用户名')
+      const result = await JellyfinClient.authenticate(inspected.baseUrl, username, typeof input?.password === 'string' ? input.password : '', inspected.identity, storedSettings.deviceId)
+      storedSettings.serverUrl = result.baseUrl
+      storedSettings.username = username
+      storedSettings.userId = result.User.Id
+      storedSettings.serverName = result.identity.name
+      storedSettings.serverVersion = result.identity.version
+      storedSettings.mediaWarpVersion = inspected.mediaWarpVersion
+      storedSettings.mpvPath = normalizeMpvPath(requireText(input?.mpvPath || storedSettings.mpvPath, 'MPV 路径'))
+      storedSettings.encryptedToken = safeStorage.isEncryptionAvailable()
+        ? safeStorage.encryptString(result.AccessToken).toString('base64')
+        : undefined
+      jellyfinClient = new JellyfinClient(result.baseUrl, result.AccessToken, result.User.Id, result.identity, storedSettings.deviceId)
+      connectionError = undefined
+      persistSettings()
+      logger.info('jellyfin', 'connected', { mediaWarpVersion: inspected.mediaWarpVersion, jellyfinVersion: result.identity.version })
+      return { settings: publicSettings(), user: result.User }
+    } catch (error) {
+      connectionError = error instanceof Error ? error.message : 'MediaWarp 连接失败'
+      throw error
+    }
   })
   ipcMain.handle('jellyfin:logout', async () => {
     await stopActivePlayback()
@@ -1167,7 +1253,9 @@ function registerIpc(): void {
     storedSettings.userId = undefined
     storedSettings.serverName = undefined
     storedSettings.serverVersion = undefined
+    storedSettings.mediaWarpVersion = undefined
     storedSettings.encryptedToken = undefined
+    connectionError = undefined
     persistSettings()
     imageCache.clear()
     inFlightImageRequests.clear()
@@ -1300,7 +1388,9 @@ if (!hasSingleInstanceLock) {
     })
     registerProcessDiagnostics()
     readSettings()
-    restoreClient()
+    void restoreClient().finally(() => {
+      mainWindow?.webContents.send('settings:changed', publicSettings())
+    })
     registerIpc()
     createWindow()
     app.on('activate', () => {

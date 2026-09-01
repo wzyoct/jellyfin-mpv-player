@@ -17,14 +17,29 @@ const HOP_BY_HOP_HEADERS = new Set([
 ])
 
 interface GatewayResource {
-  upstreamUrl: string
-  requiredHeaders: Record<string, string>
+  upstreamUrl?: string
+  requiredHeaders?: Record<string, string>
+  resolve?: () => Promise<ResolvedPlaybackResource>
+  resolved?: Promise<ResolvedPlaybackResource>
   diagnostic?: PlaybackLoadDiagnostic
 }
 
-export interface RegisterPlaybackResourceOptions {
+export interface ResolvedPlaybackResource {
   upstreamUrl: string
   requiredHeaders?: Record<string, string>
+}
+
+class PlaybackGatewayTimeoutError extends Error {
+  constructor() {
+    super('媒体首包等待超时（60 秒）')
+    this.name = 'PlaybackGatewayTimeoutError'
+  }
+}
+
+export interface RegisterPlaybackResourceOptions {
+  upstreamUrl?: string
+  requiredHeaders?: Record<string, string>
+  resolve?: () => Promise<ResolvedPlaybackResource>
 }
 
 function copyResponseHeaders(response: Response): Record<string, string> {
@@ -54,6 +69,7 @@ function requestHeaders(request: IncomingMessage): Record<string, string> {
 
 export class PlaybackGateway {
   private readonly resources = new Map<string, GatewayResource>()
+  private readonly activeControllers = new Set<AbortController>()
   private server?: Server
   private port = 0
 
@@ -86,17 +102,21 @@ export class PlaybackGateway {
   }
 
   register(options: RegisterPlaybackResourceOptions): string {
-    if (!isHttpUrl(options.upstreamUrl)) throw new Error('播放地址仅支持 HTTP 或 HTTPS')
+    if (!options.resolve && (!options.upstreamUrl || !isHttpUrl(options.upstreamUrl))) throw new Error('播放地址仅支持 HTTP 或 HTTPS')
+    if (options.resolve && options.upstreamUrl && !isHttpUrl(options.upstreamUrl)) throw new Error('播放地址仅支持 HTTP 或 HTTPS')
     if (!this.server || !this.port) throw new Error('播放网关尚未启动')
     const id = randomUUID().replace(/-/g, '')
     this.resources.set(id, {
       upstreamUrl: options.upstreamUrl,
       requiredHeaders: { ...(options.requiredHeaders || {}) },
+      resolve: options.resolve,
     })
     return `http://127.0.0.1:${this.port}/play/${id}`
   }
 
   async dispose(): Promise<void> {
+    this.activeControllers.forEach((controller) => controller.abort())
+    this.activeControllers.clear()
     this.resources.clear()
     const server = this.server
     this.server = undefined
@@ -135,33 +155,48 @@ export class PlaybackGateway {
     }
 
     const controller = new AbortController()
+    this.activeControllers.add(controller)
     request.once('aborted', () => controller.abort())
+    response.once('close', () => {
+      if (!response.writableEnded) controller.abort()
+    })
+    const previousDiagnostic = resource.diagnostic && { ...resource.diagnostic }
     const diagnostic: PlaybackLoadDiagnostic = {
       redirects: 0,
       rangeRequested: typeof request.headers.range === 'string',
-      requiredHeaders: Object.keys(resource.requiredHeaders).length > 0,
+      requiredHeaders: Object.keys(resource.requiredHeaders || {}).length > 0,
       phase: 'upstream',
       source: 'upstream',
     }
     resource.diagnostic = diagnostic
     try {
-      let currentUrl = resource.upstreamUrl
-      let upstream = await this.fetch(currentUrl, request.method, requestHeaders(request), resource.requiredHeaders, controller.signal, this.isServerOrigin(currentUrl))
+      const resolved = await this.resolveResource(resource)
+      const requiredHeaders = { ...(resolved.requiredHeaders || {}) }
+      let currentUrl = resolved.upstreamUrl
+      if (!isHttpUrl(currentUrl)) throw new Error('播放地址仅支持 HTTP 或 HTTPS')
+      diagnostic.requiredHeaders = Object.keys(requiredHeaders).length > 0
+      let upstream = await this.fetch(currentUrl, request.method, requestHeaders(request), requiredHeaders, controller.signal, this.isServerOrigin(currentUrl))
       this.recordResponse(diagnostic, upstream, currentUrl)
       let redirects = 0
-      while (isRedirect(upstream.status) && resource.requiredHeaders && Object.keys(resource.requiredHeaders).length && redirects < 3) {
+      const visited = new Set([currentUrl])
+      while (isRedirect(upstream.status) && Object.keys(requiredHeaders).length && redirects < 10) {
         const location = upstream.headers.get('location')
         if (!location) break
         const resolved = new URL(location, currentUrl).toString()
         if (!isHttpUrl(resolved)) throw new Error('上游重定向地址不是 HTTP 或 HTTPS')
+        if (visited.has(resolved)) throw new Error('上游重定向出现循环')
+        visited.add(resolved)
         currentUrl = resolved
         redirects += 1
         diagnostic.redirects = redirects
         diagnostic.phase = 'redirect'
-        upstream = await this.fetch(currentUrl, request.method, requestHeaders(request), resource.requiredHeaders, controller.signal, this.isServerOrigin(currentUrl))
+        upstream = await this.fetch(currentUrl, request.method, requestHeaders(request), requiredHeaders, controller.signal, this.isServerOrigin(currentUrl))
         this.recordResponse(diagnostic, upstream, currentUrl)
       }
 
+      if (isRedirect(upstream.status) && Object.keys(requiredHeaders).length && redirects >= 10) {
+        throw new Error('上游重定向超过 10 次限制')
+      }
       if (isRedirect(upstream.status)) {
         const location = upstream.headers.get('location')
         const resolved = location ? new URL(location, currentUrl).toString() : ''
@@ -182,24 +217,55 @@ export class PlaybackGateway {
         return
       }
       const stream = Readable.fromWeb(upstream.body as Parameters<typeof Readable.fromWeb>[0])
-      stream.once('error', (error) => {
-        diagnostic.phase = 'stream'
-        diagnostic.source = 'gateway'
-        diagnostic.status = 502
-        logger.warn('playback-gateway', 'stream-failed', {
-          status: 502,
-          contentType: diagnostic.contentType,
-          redirects: diagnostic.redirects,
-          rangeRequested: diagnostic.rangeRequested,
-          requiredHeaders: diagnostic.requiredHeaders,
-          phase: diagnostic.phase,
-          message: error instanceof Error ? error.message : String(error),
+      await new Promise<void>((resolve, reject) => {
+        let firstByteTimedOut = false
+        const firstByteTimer = setTimeout(() => {
+          firstByteTimedOut = true
+          controller.abort()
+          stream.destroy(new PlaybackGatewayTimeoutError())
+        }, 60_000)
+        const onFirstByte = () => clearTimeout(firstByteTimer)
+        stream.once('data', onFirstByte)
+        stream.once('end', resolve)
+        stream.once('close', () => {
+          clearTimeout(firstByteTimer)
+          resolve()
         })
-        response.destroy()
+        stream.once('error', (error) => {
+          clearTimeout(firstByteTimer)
+          if (!firstByteTimedOut && (controller.signal.aborted || isNormalCancellation(error))) {
+            if (previousDiagnostic?.status && previousDiagnostic.status >= 200 && previousDiagnostic.status < 300) resource.diagnostic = previousDiagnostic
+            resolve()
+            return
+          }
+          diagnostic.phase = 'stream'
+          diagnostic.source = 'gateway'
+          diagnostic.status = 502
+          logger.warn('playback-gateway', 'stream-failed', {
+            status: 502,
+            contentType: diagnostic.contentType,
+            redirects: diagnostic.redirects,
+            rangeRequested: diagnostic.rangeRequested,
+            requiredHeaders: diagnostic.requiredHeaders,
+            phase: diagnostic.phase,
+            message: error instanceof Error ? error.message : String(error),
+          })
+          response.destroy()
+          reject(error)
+        })
+        response.once('close', () => {
+          if (!response.writableEnded) {
+            controller.abort()
+            stream.destroy()
+          }
+        })
+        stream.pipe(response)
       })
-      stream.pipe(response)
     } catch (error) {
-      if (controller.signal.aborted) return
+      if (!isGatewayTimeoutError(error) && (controller.signal.aborted || isNormalCancellation(error))) {
+        if (previousDiagnostic?.status && previousDiagnostic.status >= 200 && previousDiagnostic.status < 300) resource.diagnostic = previousDiagnostic
+        return
+      }
       diagnostic.phase = 'gateway'
       diagnostic.source = 'gateway'
       diagnostic.status = 502
@@ -215,7 +281,24 @@ export class PlaybackGateway {
       })
       if (!response.headersSent) response.writeHead(502, { 'Content-Type': 'text/plain; charset=utf-8' })
       response.end('播放网关请求失败')
+    } finally {
+      this.activeControllers.delete(controller)
     }
+  }
+
+  private resolveResource(resource: GatewayResource): Promise<ResolvedPlaybackResource> {
+    if (resource.upstreamUrl) return Promise.resolve({ upstreamUrl: resource.upstreamUrl, requiredHeaders: resource.requiredHeaders })
+    if (!resource.resolve) return Promise.reject(new Error('播放资源解析器不可用'))
+    if (!resource.resolved) {
+      resource.resolved = resource.resolve().then((resolved) => {
+        if (!resolved || !isHttpUrl(resolved.upstreamUrl)) throw new Error('播放地址仅支持 HTTP 或 HTTPS')
+        return resolved
+      }).catch((error) => {
+        resource.resolved = undefined
+        throw error
+      })
+    }
+    return resource.resolved
   }
 
   private recordResponse(diagnostic: PlaybackLoadDiagnostic, response: Response, url: string): void {
@@ -231,7 +314,7 @@ export class PlaybackGateway {
     })
   }
 
-  private fetch(url: string, method: string, headers: Record<string, string>, requiredHeaders: Record<string, string>, signal: AbortSignal, includeAuthorization = true): Promise<Response> {
+  private async fetch(url: string, method: string, headers: Record<string, string>, requiredHeaders: Record<string, string>, signal: AbortSignal, includeAuthorization = true): Promise<Response> {
     const requestHeaders = new Headers(headers)
     requestHeaders.set('User-Agent', 'libmpv')
     Object.entries(requiredHeaders).forEach(([key, value]) => {
@@ -239,7 +322,20 @@ export class PlaybackGateway {
       requestHeaders.set(key, value)
     })
     if (includeAuthorization) requestHeaders.set('Authorization', this.client.buildAuthorization())
-    return fetch(url, { method, headers: requestHeaders, redirect: 'manual', signal })
+    const controller = new AbortController()
+    const onAbort = () => controller.abort()
+    signal.addEventListener('abort', onAbort, { once: true })
+    let timedOut = false
+    const timer = setTimeout(() => { timedOut = true; controller.abort() }, 60_000)
+    try {
+      return await fetch(url, { method, headers: requestHeaders, redirect: 'manual', signal: controller.signal })
+    } catch (error) {
+      if (timedOut) throw new PlaybackGatewayTimeoutError()
+      throw error
+    } finally {
+      clearTimeout(timer)
+      signal.removeEventListener('abort', onAbort)
+    }
   }
 
   private isServerOrigin(url: string): boolean {
@@ -249,4 +345,14 @@ export class PlaybackGateway {
       return false
     }
   }
+}
+
+function isNormalCancellation(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const value = error as { name?: unknown; code?: unknown; message?: unknown }
+  return value.name === 'AbortError' || value.code === 'ERR_STREAM_PREMATURE_CLOSE' || value.code === 'ECONNRESET' || (typeof value.message === 'string' && /aborted|premature close|socket hang up/i.test(value.message))
+}
+
+function isGatewayTimeoutError(error: unknown): boolean {
+  return error instanceof PlaybackGatewayTimeoutError
 }

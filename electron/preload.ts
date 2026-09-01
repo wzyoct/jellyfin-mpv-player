@@ -36,6 +36,11 @@ const api: JellyfinApi = {
     ipcRenderer.on('window:full-screen-changed', listener)
     return () => ipcRenderer.removeListener('window:full-screen-changed', listener)
   },
+  onSettingsChanged: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, settings: Parameters<typeof callback>[0]) => callback(settings)
+    ipcRenderer.on('settings:changed', listener)
+    return () => ipcRenderer.removeListener('settings:changed', listener)
+  },
   validateMpvPath: (path?: string) => invoke('mpv:validate', path),
   testMpvPath: (path?: string) => invoke('mpv:test', path),
   openLogDirectory: () => invoke('diagnostics:open-log-directory'),

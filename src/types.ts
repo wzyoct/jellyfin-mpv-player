@@ -127,6 +127,8 @@ export interface PublicSettings {
   userId?: string
   serverName?: string
   serverVersion?: string
+  mediaWarpVersion?: string
+  connectionError?: string
   mpvPath: string
   connected: boolean
   secureStorageAvailable: boolean
@@ -180,11 +182,15 @@ export interface AudioPreference {
   index?: number
   language?: string
   title?: string
+  codec?: string
 }
 
 export interface SubtitlePreference {
   index?: number
   disabled?: boolean
+  language?: string
+  title?: string
+  codec?: string
 }
 
 export interface StartPlaybackRequest {
@@ -293,6 +299,7 @@ export interface JellyfinApi {
   getFullScreen(): Promise<boolean>
   setFullScreen(enabled: boolean): Promise<boolean>
   onFullScreenChanged(callback: (enabled: boolean) => void): () => void
+  onSettingsChanged(callback: (settings: PublicSettings) => void): () => void
   validateMpvPath(path?: string): Promise<MpvValidationResult>
   testMpvPath(path?: string): Promise<MpvValidationResult>
   openLogDirectory(): Promise<void>

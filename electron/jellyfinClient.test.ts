@@ -1,5 +1,5 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest'
-import { JellyfinClient, identifyJellyfin, normalizeServerUrl } from './jellyfinClient'
+import { JellyfinClient, identifyJellyfin, normalizeServerUrl, PlaybackInfoTimeoutError } from './jellyfinClient'
 
 vi.mock('./logger', () => ({ logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } }))
 
@@ -29,6 +29,33 @@ describe('Jellyfin client contract', () => {
     expect(identifyJellyfin({ ProductName: 'Jellyfin Server', ServerName: 'Home', Version: '10.11.11' })).toEqual({ name: 'Home', version: '10.11.11' })
     expect(() => identifyJellyfin({ ProductName: 'Emby', Version: '4.8.0' })).toThrow('不是 Jellyfin')
     expect(() => identifyJellyfin({ ProductName: 'Jellyfin Server', Version: '10.10.7' })).toThrow('需要 Jellyfin 10.11.x')
+  })
+
+  it('requires MediaWarp before accepting Jellyfin and returns both versions', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ app_version: '0.2.4' }))
+      .mockResolvedValueOnce(jsonResponse({ ProductName: 'Jellyfin Server', ServerName: 'Home', Version: '10.11.11' }))
+    await expect(JellyfinClient.inspect('http://media.example.test:9000')).resolves.toMatchObject({
+      baseUrl: 'http://media.example.test:9000',
+      mediaWarpVersion: '0.2.4',
+      identity: { version: '10.11.11' },
+    })
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      'http://media.example.test:9000/MediaWarp/version',
+      'http://media.example.test:9000/System/Info/Public',
+    ])
+  })
+
+  it('rejects a direct Jellyfin address with an actionable MediaWarp message', async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ error: 'not found' }, 404))
+      .mockResolvedValueOnce(jsonResponse({ ProductName: 'Jellyfin Server', Version: '10.11.11' }))
+    await expect(JellyfinClient.inspect('http://media.example.test:8096')).rejects.toThrow('当前地址绕过 MediaWarp')
+  })
+
+  it('rejects MediaWarp versions older than 0.2.4', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ app_version: '0.2.3' }))
+    await expect(JellyfinClient.inspect('http://media.example.test:9000')).rejects.toThrow('需要 0.2.4')
   })
 
   it('uses Jellyfin Authorization for API requests', async () => {
@@ -115,5 +142,11 @@ describe('Jellyfin client contract', () => {
     await expect(client.getViews()).rejects.toThrow('Jellyfin 请求失败（502）')
     fetchMock.mockResolvedValueOnce(jsonResponse({ Items: [] }))
     await expect(client.getViews()).rejects.toThrow('缺少 Items 或 TotalRecordCount')
+  })
+
+  it('translates a PlaybackInfo timeout without exposing AbortError text', async () => {
+    fetchMock.mockRejectedValueOnce(Object.assign(new Error('This operation was aborted'), { name: 'AbortError' }))
+    const client = new JellyfinClient('https://media.example.test', 'token', 'user-1', identity)
+    await expect(client.getPlaybackInfo('slow-item')).rejects.toBeInstanceOf(PlaybackInfoTimeoutError)
   })
 })
