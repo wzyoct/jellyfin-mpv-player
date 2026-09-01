@@ -28,9 +28,9 @@ describe('AppLogger', () => {
     logger.initialize(directory)
     for (let index = 0; index < 3600; index += 1) logger.info('test', 'large-entry', { value: 'x'.repeat(1800) })
 
-    const current = readFileSync(join(directory, 'ember-player.log'), 'utf8')
+    const current = readFileSync(join(directory, 'jellyfin-mpv-player.log'), 'utf8')
     expect(current).toContain('"scope":"test"')
-    expect(readFileSync(join(directory, 'ember-player.log.1'), 'utf8').length).toBeGreaterThan(0)
+    expect(readFileSync(join(directory, 'jellyfin-mpv-player.log.1'), 'utf8').length).toBeGreaterThan(0)
   })
 
   it('does not throw when the log path is a file', () => {
@@ -46,14 +46,14 @@ describe('AppLogger', () => {
 
   it('prunes history beyond the four retained backups', () => {
     const directory = mkdtempSync(join(tmpdir(), 'ember-logger-prune-'))
-    writeFileSync(join(directory, 'ember-player.log.4'), 'keep')
-    writeFileSync(join(directory, 'ember-player.log.5'), 'remove')
+    writeFileSync(join(directory, 'jellyfin-mpv-player.log.4'), 'keep')
+    writeFileSync(join(directory, 'jellyfin-mpv-player.log.5'), 'remove')
     const logger = new AppLogger()
 
     logger.initialize(directory)
 
-    expect(existsSync(join(directory, 'ember-player.log.4'))).toBe(true)
-    expect(existsSync(join(directory, 'ember-player.log.5'))).toBe(false)
+    expect(existsSync(join(directory, 'jellyfin-mpv-player.log.4'))).toBe(true)
+    expect(existsSync(join(directory, 'jellyfin-mpv-player.log.5'))).toBe(false)
   })
 
   it('serializes non-Error failures and ignores writes before initialization', () => {
@@ -64,7 +64,7 @@ describe('AppLogger', () => {
     logger.initialize(directory)
     logger.warn('test', 'warning')
     logger.error('test', 'non-error', 'plain failure', { token: 'secret' })
-    const line = readFileSync(join(directory, 'ember-player.log'), 'utf8')
+    const line = readFileSync(join(directory, 'jellyfin-mpv-player.log'), 'utf8')
     expect(line).toContain('plain failure')
     expect(line).toContain('[REDACTED]')
   })

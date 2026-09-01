@@ -1,10 +1,10 @@
 /// <reference types="vite/client" />
 
-import type { MediaServerApi } from './types'
+import type { JellyfinApi } from './types'
 
 declare global {
   interface Window {
-    mediaServer: MediaServerApi
+    jellyfin: JellyfinApi
   }
 }
 

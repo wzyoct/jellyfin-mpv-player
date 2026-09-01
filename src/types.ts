@@ -20,6 +20,10 @@ export interface MediaStream {
   IsExternalUrl?: boolean
   IsTextSubtitleStream?: boolean
   DeliveryUrl?: string
+  DeliveryMethod?: 'Encode' | 'Embed' | 'External' | 'Hls' | string
+  IsForced?: boolean
+  IsHearingImpaired?: boolean
+  Referrer?: string
   SupportsExternalStream?: boolean
   Path?: string
 }
@@ -99,6 +103,12 @@ export interface MediaSourceInfo {
   AddApiKeyToDirectStreamUrl?: boolean
   RequiredHttpHeaders?: Record<string, string>
   MediaStreams?: MediaStream[]
+  Protocol?: 'Http' | 'File' | 'Rtmp' | 'Rtsp' | string
+  Path?: string
+  IsRemote?: boolean
+  SupportsTranscoding?: boolean
+  DefaultAudioStreamIndex?: number
+  DefaultSubtitleStreamIndex?: number
 }
 
 export interface PlaybackInfo {
@@ -106,10 +116,7 @@ export interface PlaybackInfo {
   PlaySessionId?: string
 }
 
-export type MediaServerKind = 'jellyfin' | 'emby'
-
-export interface MediaServerIdentity {
-  kind: MediaServerKind
+export interface JellyfinIdentity {
   name: string
   version: string
 }
@@ -118,7 +125,6 @@ export interface PublicSettings {
   serverUrl: string
   username: string
   userId?: string
-  serverKind?: MediaServerKind
   serverName?: string
   serverVersion?: string
   mpvPath: string
@@ -248,7 +254,30 @@ export interface PlaybackReportPayload {
   QueueableMediaTypes?: string[]
 }
 
-export interface MediaServerApi {
+export interface PlaybackInfoRequest {
+  mediaSourceId?: string
+  audioStreamIndex?: number
+  subtitleStreamIndex?: number
+  startTimeTicks?: number
+}
+
+export interface PlaybackRoute {
+  kind: 'direct-play' | 'direct-stream' | 'transcode'
+  upstreamUrl: string
+  mediaSourceId: string
+  playSessionId?: string
+  requiredHttpHeaders: Record<string, string>
+}
+
+export interface SubtitleRoute {
+  deliveryMethod: string
+  deliveryUrl?: string
+  codec?: string
+  streamIndex: number
+  isExternal?: boolean
+}
+
+export interface JellyfinApi {
   getSettings(): Promise<PublicSettings>
   saveSettings(input: SettingsInput): Promise<PublicSettings>
   login(input: { serverUrl: string; username: string; password: string; mpvPath: string }): Promise<LoginResult>
@@ -257,7 +286,7 @@ export interface MediaServerApi {
   getItems(query?: ItemsQuery): Promise<ItemResult>
   getMovieRecommendations(): Promise<RecommendationDto[]>
   getItem(itemId: string): Promise<MediaItem>
-  getPlaybackInfo(itemId: string): Promise<PlaybackInfo>
+  getPlaybackInfo(itemId: string, request?: PlaybackInfoRequest): Promise<PlaybackInfo>
   getNextUp(seriesId?: string): Promise<ItemResult>
   getSeriesEpisodes(seriesId: string): Promise<MediaItem[]>
   getImage(request: ImageRequest): Promise<string>

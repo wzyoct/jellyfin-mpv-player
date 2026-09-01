@@ -29,6 +29,10 @@ class FakeMpvIpc {
     ['duration', 100],
     ['pause', true],
     ['playlist', [{ id: 1 }]],
+    ['track-list', [
+      { id: 1, type: 'audio', 'ff-index': 1 },
+      { id: 2, type: 'sub', 'ff-index': 2 },
+    ]],
   ])
   eventHandler?: (message: MpvIpcMessage) => void
   readonly send = vi.fn(async () => undefined)
@@ -231,21 +235,21 @@ describe('Electron main process IPC orchestration', () => {
       .mockResolvedValueOnce(jsonResponse({ ProductName: 'Jellyfin Server', ServerName: 'Test Jellyfin', Version: '10.11.11' }))
       .mockResolvedValueOnce(jsonResponse({ AccessToken: 'token-1', User: { Id: 'user-1', Name: 'Mickey' } }))
       .mockResolvedValueOnce(new Response(Uint8Array.from([1, 2, 3]), { status: 200, headers: { 'content-type': 'image/png' } }))
-    const result = await handler('media:login')({}, {
+    const result = await handler('jellyfin:login')({}, {
       serverUrl: 'media.example.test',
       username: ' mickey ',
       password: 'secret',
       mpvPath: 'mpv.exe',
     })
     expect(result.user).toEqual({ Id: 'user-1', Name: 'Mickey' })
-    expect(result.settings).toMatchObject({ connected: true, userId: 'user-1', username: 'mickey', serverKind: 'jellyfin', serverVersion: '10.11.11' })
+    expect(result.settings).toMatchObject({ connected: true, userId: 'user-1', username: 'mickey', serverVersion: '10.11.11' })
     const [loginUrl, loginInit] = mocks.fetchMock.mock.calls[1]
     expect(loginUrl).toBe('http://media.example.test/Users/AuthenticateByName')
     expect(JSON.parse(loginInit.body)).toEqual({ Username: 'mickey', Pw: 'secret' })
 
     const request = { itemId: 'item-1', imageType: 'Primary', tag: 'tag-1', maxWidth: 480 }
-    await expect(handler('media:get-image')({}, request)).resolves.toBe('data:image/png;base64,AQID')
-    await expect(handler('media:get-image')({}, request)).resolves.toBe('data:image/png;base64,AQID')
+    await expect(handler('jellyfin:get-image')({}, request)).resolves.toBe('data:image/png;base64,AQID')
+    await expect(handler('jellyfin:get-image')({}, request)).resolves.toBe('data:image/png;base64,AQID')
     expect(mocks.fetchMock).toHaveBeenCalledTimes(3)
     expect(mocks.fetchMock.mock.calls[2][0]).toContain('/Items/item-1/Images/Primary')
     expect((mocks.fetchMock.mock.calls[2][1].headers as Headers).get('Authorization')).toContain('Token="token-1"')
@@ -254,8 +258,8 @@ describe('Electron main process IPC orchestration', () => {
     const pendingImage = new Promise<Response>((resolve) => { resolveImage = resolve })
     mocks.fetchMock.mockReturnValueOnce(pendingImage)
     const concurrentRequest = { itemId: 'item-2', imageType: 'Primary', tag: 'tag-2', maxWidth: 480 }
-    const first = handler('media:get-image')({}, concurrentRequest)
-    const second = handler('media:get-image')({}, concurrentRequest)
+    const first = handler('jellyfin:get-image')({}, concurrentRequest)
+    const second = handler('jellyfin:get-image')({}, concurrentRequest)
     await flush()
     expect(mocks.fetchMock).toHaveBeenCalledTimes(4)
     resolveImage(new Response(Uint8Array.from([4, 5, 6]), { status: 200, headers: { 'content-type': 'image/png' } }))
@@ -325,7 +329,7 @@ describe('Electron main process IPC orchestration', () => {
 
   it('rejects a Jellyfin version outside the supported stable baseline', async () => {
     mocks.fetchMock.mockResolvedValueOnce(jsonResponse({ ProductName: 'Jellyfin Server', Version: '12.0.0-rc7' }))
-    await expect(handler('media:login')({}, {
+    await expect(handler('jellyfin:login')({}, {
       serverUrl: 'media.example.test',
       username: 'mickey',
       password: '',
@@ -344,12 +348,11 @@ describe('Electron main process IPC orchestration', () => {
       username: 'next-user',
       connected: false,
       userId: undefined,
-      serverKind: undefined,
       serverName: undefined,
       serverVersion: undefined,
     })
 
-    const settings = await handler('media:logout')()
+    const settings = await handler('jellyfin:logout')()
     expect(settings).toMatchObject({ connected: false, userId: undefined })
     expect(await handler('settings:get')()).toMatchObject({ connected: false })
   })

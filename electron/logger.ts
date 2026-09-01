@@ -3,7 +3,7 @@ import { join } from 'node:path'
 
 export type LogLevel = 'info' | 'warn' | 'error'
 
-const LOG_FILE = 'ember-player.log'
+const LOG_FILE = 'jellyfin-mpv-player.log'
 const MAX_FILE_BYTES = 5 * 1024 * 1024
 const MAX_BACKUPS = 4
 const MAX_TEXT_LENGTH = 2000
@@ -112,14 +112,14 @@ export class AppLogger {
 
   private pruneBackups(): void {
     for (const name of readdirSync(this.directory)) {
-      const match = name.match(/^ember-player\.log\.(\d+)$/)
+      const match = name.match(/^jellyfin-mpv-player\.log\.(\d+)$/)
       if (match && Number(match[1]) > MAX_BACKUPS) unlinkSync(join(this.directory, name))
     }
   }
 
   private reportWriteFailure(error: unknown): void {
     const details = errorText(error)
-    process.stderr.write(`Ember Player logger failed: ${redactText(details.message)}\n`)
+    process.stderr.write(`Jellyfin MPV Player logger failed: ${redactText(details.message)}\n`)
   }
 }
 

@@ -35,7 +35,7 @@ const sandbox = {
     return {
       contextBridge: {
         exposeInMainWorld: (name, api) => {
-          assert.equal(name, 'mediaServer')
+          assert.equal(name, 'jellyfin')
           exposedApi = api
         },
       },
@@ -71,7 +71,7 @@ const expectedMethods = [
   'getPlaybackSnapshot',
   'onPlaybackChanged',
 ]
-assert.ok(exposedApi, 'preload must expose window.mediaServer')
+assert.ok(exposedApi, 'preload must expose window.jellyfin')
 for (const method of expectedMethods) assert.equal(typeof exposedApi[method], 'function', `missing preload API method: ${method}`)
 
 async function run() {

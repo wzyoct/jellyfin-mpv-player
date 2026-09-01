@@ -3,13 +3,13 @@ import { spawn, spawnSync, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
-import { MediaServerClient, mediaServerLabel, normalizeServerUrl, type MediaSourceInfo, type PlaybackInfo } from './mediaServer'
+import { JellyfinClient, normalizeServerUrl, type MediaSourceInfo, type PlaybackInfo } from './jellyfinClient'
+import { PlaybackGateway } from './playbackGateway'
 import { MpvIpc, type MpvIpcMessage } from './mpvIpc'
-import { buildMpvHttpHeaders } from './mpvHeaders'
 import { normalizeMpvPath } from './mpvPath'
 import { logger } from './logger'
 import { buildEpisodeQueue } from '../src/playbackQueue'
-import { buildHexPlaylistUrl, headerSignature, mapWithConcurrency } from './playbackPlaylist'
+import { buildHexPlaylistUrl, mapWithConcurrency } from './playbackPlaylist'
 import { chooseDefaultSubtitle } from '../src/subtitlePreference'
 import { isResumePositionReached, resolveResumeTicks } from './playbackLogic'
 import type {
@@ -25,25 +25,21 @@ import type {
   PlaybackPhase,
   StartPlaybackRequest,
   SubtitlePreference,
-  MediaServerIdentity,
-  MediaServerKind,
+  JellyfinIdentity,
+  PlaybackInfoRequest,
+  PlaybackRoute,
+  SubtitleRoute,
 } from '../src/types'
 
 interface StoredSettings {
   serverUrl: string
   username: string
   userId?: string
-  serverKind?: MediaServerKind
   serverName?: string
   serverVersion?: string
   encryptedToken?: string
   mpvPath: string
   deviceId: string
-}
-
-const KNOWN_SERVER_KINDS: Record<string, MediaServerKind> = {
-  jellyfin: 'jellyfin',
-  emby: 'emby',
 }
 
 interface PlaybackEntry extends PlaybackQueueItem {
@@ -62,6 +58,7 @@ interface PlaybackEntry extends PlaybackQueueItem {
   playlistEntryId?: number
   playlistIndex?: number
   loaded: boolean
+  subtitleRoute?: SubtitleRoute
 }
 
 interface PlaybackSession {
@@ -94,6 +91,7 @@ interface PlaybackSession {
   audioPreference?: AudioPreference
   subtitlePreference?: SubtitlePreference
   mediaSourceId?: string
+  gateway: PlaybackGateway
 }
 
 interface PreparedEntry {
@@ -116,7 +114,7 @@ let storedSettings: StoredSettings = {
   mpvPath: 'mpv.exe',
   deviceId: randomUUID(),
 }
-let mediaServerClient: MediaServerClient | null = null
+let jellyfinClient: JellyfinClient | null = null
 let activeSession: PlaybackSession | null = null
 let revisionCounter = 0
 let lastSnapshot: PlaybackSnapshot = {
@@ -160,9 +158,8 @@ function readSettings(): void {
     storedSettings = {
       ...storedSettings,
       ...persisted,
-      serverKind: KNOWN_SERVER_KINDS[String(persisted.serverKind)] || (persisted.userId && persisted.encryptedToken ? 'emby' : undefined),
-      serverName: persisted.serverName || (persisted.userId && persisted.encryptedToken ? 'Emby Server' : undefined),
-      serverVersion: persisted.serverVersion || (persisted.userId && persisted.encryptedToken ? 'legacy' : undefined),
+      serverName: persisted.serverName,
+      serverVersion: persisted.serverVersion,
       mpvPath: normalizeMpvPath(persisted.mpvPath),
       deviceId: persisted.deviceId || randomUUID(),
     }
@@ -193,11 +190,10 @@ function publicSettings() {
     serverUrl: storedSettings.serverUrl,
     username: storedSettings.username,
     userId: storedSettings.userId,
-    serverKind: storedSettings.serverKind,
     serverName: storedSettings.serverName,
     serverVersion: storedSettings.serverVersion,
     mpvPath: storedSettings.mpvPath || 'mpv.exe',
-    connected: Boolean(mediaServerClient),
+    connected: Boolean(jellyfinClient),
     secureStorageAvailable: safeStorage.isEncryptionAvailable(),
   }
 }
@@ -205,6 +201,11 @@ function publicSettings() {
 function resolveMpvPath(candidate?: string): string {
   const selected = typeof candidate === 'string' && candidate.trim() ? candidate : storedSettings.mpvPath
   return normalizeMpvPath(selected)
+}
+
+function requireText(value: unknown, label: string, maxLength = 512): string {
+  if (typeof value !== 'string' || !value.trim() || value.length > maxLength) throw new Error(`${label}无效`)
+  return value.trim()
 }
 
 function parseMpvVersion(output: string): { raw?: string; supported: boolean } {
@@ -241,26 +242,25 @@ function restoreClient(): void {
   const token = decryptToken()
   if (token && storedSettings.userId) {
     try {
-      const identity: MediaServerIdentity = {
-        kind: storedSettings.serverKind || 'emby',
-        name: storedSettings.serverName || (storedSettings.serverKind === 'jellyfin' ? 'Jellyfin Server' : 'Emby Server'),
-        version: storedSettings.serverVersion || 'legacy',
+      const identity: JellyfinIdentity = {
+        name: storedSettings.serverName || 'Jellyfin Server',
+        version: storedSettings.serverVersion || '10.11.x',
       }
-      mediaServerClient = new MediaServerClient(storedSettings.serverUrl, token, storedSettings.userId, identity, storedSettings.deviceId)
+      jellyfinClient = new JellyfinClient(storedSettings.serverUrl, token, storedSettings.userId, identity, storedSettings.deviceId)
     } catch (error) {
-      mediaServerClient = null
-      logger.error('media-server', 'restore-client-failed', error)
+      jellyfinClient = null
+      logger.error('jellyfin', 'restore-client-failed', error)
     }
   }
 }
 
-function getClient(): MediaServerClient {
-  if (!mediaServerClient) throw new Error('请先连接 Jellyfin 或 Emby 服务器')
-  return mediaServerClient
+function getClient(): JellyfinClient {
+  if (!jellyfinClient) throw new Error('请先连接 Jellyfin 服务器')
+  return jellyfinClient
 }
 
 function currentServerLabel(): string {
-  return mediaServerLabel(mediaServerClient?.identity.kind)
+  return 'Jellyfin'
 }
 
 function queueItem(item: MediaItem): PlaybackQueueItem {
@@ -277,7 +277,7 @@ function queueItem(item: MediaItem): PlaybackQueueItem {
   }
 }
 
-async function buildQueue(client: MediaServerClient, itemId: string): Promise<{ items: MediaItem[]; startIndex: number }> {
+async function buildQueue(client: JellyfinClient, itemId: string): Promise<{ items: MediaItem[]; startIndex: number }> {
   const selected = await client.getItem(itemId)
   if (selected.Type !== 'Episode' || !selected.SeriesId) return { items: [selected], startIndex: 0 }
 
@@ -303,10 +303,18 @@ function chooseSubtitle(streams: MediaStream[], preference?: SubtitlePreference)
 
 async function prepareEntry(session: PlaybackSession, item: MediaItem, startTimeTicks = 0): Promise<PlaybackEntry> {
   const client = getClient()
-  const playbackInfo = await client.getPlaybackInfo(item.Id)
+  const requestedStreams = item.MediaStreams || []
+  const playbackRequest: PlaybackInfoRequest = {
+    mediaSourceId: session.mediaSourceId,
+    audioStreamIndex: chooseAudio(requestedStreams, session.audioPreference),
+    subtitleStreamIndex: chooseSubtitle(requestedStreams, session.subtitlePreference),
+    startTimeTicks,
+  }
+  const playbackInfo = await client.getPlaybackInfo(item.Id, playbackRequest)
   const sources = playbackInfo.MediaSources || []
   if (!sources.length) throw new Error(`《${item.Name}》没有可用的视频源`)
   const requestedSource = session.mediaSourceId ? sources.find((candidate) => candidate.Id === session.mediaSourceId) : undefined
+  if (session.mediaSourceId && !requestedSource) throw new Error(`《${item.Name}》没有找到指定媒体源`)
   const source = requestedSource
     || sources.find((candidate) => candidate.SupportsDirectPlay)
     || sources.find((candidate) => candidate.SupportsDirectStream)
@@ -314,6 +322,7 @@ async function prepareEntry(session: PlaybackSession, item: MediaItem, startTime
   const streams = (source.MediaStreams || item.MediaStreams || []) as MediaStream[]
   const audioStreamIndex = chooseAudio(streams, session.audioPreference)
   const subtitleStreamIndex = chooseSubtitle(streams, session.subtitlePreference)
+  const subtitle = subtitleStreamIndex === undefined ? undefined : streams.find((stream) => stream.Type === 'Subtitle' && stream.Index === subtitleStreamIndex)
   return {
     ...queueItem(item),
     item,
@@ -328,6 +337,13 @@ async function prepareEntry(session: PlaybackSession, item: MediaItem, startTime
     finalized: false,
     initialResumeTicks: Math.max(0, startTimeTicks),
     loaded: false,
+    subtitleRoute: subtitle && subtitleStreamIndex !== undefined ? {
+      deliveryMethod: subtitle.DeliveryMethod || (subtitle.IsExternal ? 'External' : 'Embed'),
+      deliveryUrl: subtitle.DeliveryUrl,
+      codec: subtitle.Codec,
+      streamIndex: subtitleStreamIndex,
+      isExternal: Boolean(subtitle.IsExternal || subtitle.IsExternalUrl),
+    } : undefined,
   }
 }
 
@@ -368,7 +384,7 @@ function reportPayload(session: PlaybackSession, entry: PlaybackEntry, eventName
     ItemId: entry.itemId,
     MediaSourceId: entry.source.Id,
     PlaySessionId: entry.playbackInfo.PlaySessionId,
-    PlayMethod: entry.source.SupportsDirectPlay ? 'DirectPlay' : 'DirectStream',
+    PlayMethod: entry.source.TranscodingUrl && !entry.source.DirectStreamUrl ? 'Transcode' : entry.source.SupportsDirectPlay ? 'DirectPlay' : 'DirectStream',
     PositionTicks: Math.max(0, Math.round(entry.positionSeconds * 10_000_000)),
     IsPaused: entry.isPaused,
     CanSeek: true,
@@ -384,7 +400,7 @@ function reportPayload(session: PlaybackSession, entry: PlaybackEntry, eventName
 type PlaybackProgressEvent = NonNullable<PlaybackReportPayload['EventName']>
 
 async function reportEntryProgress(session: PlaybackSession, entry: PlaybackEntry, force = false, eventName: PlaybackProgressEvent = 'TimeUpdate'): Promise<void> {
-  const client = mediaServerClient
+  const client = jellyfinClient
   if (!client || entry.finalized || (!force && !entry.positionFresh && !entry.isPaused)) return
   await client.reportProgress(reportPayload(session, entry, eventName))
   entry.positionFresh = false
@@ -450,7 +466,7 @@ async function finalizeEntry(session: PlaybackSession, entry: PlaybackEntry, rea
     session.syncError = error instanceof Error ? error.message : `${currentServerLabel()} 进度上报失败`
   }
   if (!entry.positionObserved && !session.syncError) session.syncError = '未能取得 MPV 的最终播放位置'
-  const client = mediaServerClient
+  const client = jellyfinClient
   if (client) {
     try {
       await client.reportStopped(reportPayload(session, entry, undefined, entry.playlistIndex ?? session.currentIndex))
@@ -482,6 +498,7 @@ async function finishSession(session: PlaybackSession, reason: string, terminate
     session.stopped = true
     if (session.idleFinishTimer) clearTimeout(session.idleFinishTimer)
     session.ipc.close()
+    await session.gateway.dispose()
     if (terminate && !session.process.killed) session.process.kill()
     if (activeSession === session) activeSession = null
     session.phase = reason === 'error' ? 'error' : 'stopped'
@@ -491,11 +508,24 @@ async function finishSession(session: PlaybackSession, reason: string, terminate
 }
 
 function buildStreamUrl(session: PlaybackSession, entry: PlaybackEntry): string {
-  return getClient().buildStreamUrl(entry.itemId, entry.source, {
+  const upstreamUrl = getClient().buildStreamUrl(entry.itemId, entry.source, {
     audioStreamIndex: entry.audioStreamIndex,
     subtitleStreamIndex: entry.subtitleStreamIndex,
     playSessionId: entry.playbackInfo.PlaySessionId,
   })
+  const route: PlaybackRoute = {
+    kind: entry.source.TranscodingUrl && !entry.source.DirectStreamUrl
+      ? 'transcode'
+      : entry.source.SupportsDirectPlay ? 'direct-play' : 'direct-stream',
+    upstreamUrl,
+    mediaSourceId: entry.source.Id,
+    playSessionId: entry.playbackInfo.PlaySessionId,
+    requiredHttpHeaders: { ...(entry.source.RequiredHttpHeaders || {}) },
+  }
+  let host = 'unknown'
+  try { host = new URL(route.upstreamUrl).hostname } catch { /* validated by the gateway */ }
+  logger.info('playback', 'route-registered', { sessionId: session.sessionId, itemId: entry.itemId, kind: route.kind, host, mediaSourceId: route.mediaSourceId })
+  return session.gateway.register({ upstreamUrl: route.upstreamUrl, requiredHeaders: route.requiredHttpHeaders })
 }
 
 async function seekEntry(session: PlaybackSession, entry: PlaybackEntry, startTimeTicks: number): Promise<void> {
@@ -523,15 +553,31 @@ async function activateLoadedEntry(session: PlaybackSession, entry: PlaybackEntr
   if (entry.loaded || session.stopped) return
   entry.loaded = true
   if (entry.initialResumeTicks > 0) await seekEntry(session, entry, entry.initialResumeTicks)
-  if (entry.subtitleStreamIndex !== undefined) {
-    const subtitle = entry.source.MediaStreams?.find((stream) => stream.Type === 'Subtitle' && stream.Index === entry.subtitleStreamIndex)
-    if (!subtitle || subtitle.IsTextSubtitleStream !== false) {
-      await session.ipc.send(['sub-add', getClient().buildSubtitleUrl(entry.itemId, entry.source.Id, entry.subtitleStreamIndex), 'select']).catch(() => undefined)
+  if (entry.subtitleRoute) {
+    const route = entry.subtitleRoute
+    if (route.deliveryMethod.toLowerCase() === 'external' || route.isExternal) {
+      if (!route.deliveryUrl) throw new Error(`《${entry.name}》的外挂字幕没有可用的 DeliveryUrl`)
+      const subtitleUrl = session.gateway.register({ upstreamUrl: getClient().resolveUrl(route.deliveryUrl) })
+      await session.ipc.send(['sub-add', subtitleUrl, 'select'])
+    } else {
+      const tracks = await session.ipc.getProperty('track-list')
+      const track = Array.isArray(tracks)
+        ? (tracks as Array<{ type?: unknown; id?: unknown; 'ff-index'?: unknown }>).find((candidate) => candidate.type === 'sub' && candidate['ff-index'] === route.streamIndex)
+        : undefined
+      if (!track || typeof track.id !== 'number') throw new Error(`《${entry.name}》未能映射内嵌字幕轨道 ${route.streamIndex}`)
+      await session.ipc.setProperty('sid', track.id)
     }
+  }
+  if (entry.audioStreamIndex !== undefined) {
+    const tracks = await session.ipc.getProperty('track-list')
+    const track = Array.isArray(tracks)
+      ? (tracks as Array<{ type?: unknown; id?: unknown; 'ff-index'?: unknown }>).find((candidate) => candidate.type === 'audio' && candidate['ff-index'] === entry.audioStreamIndex)
+      : undefined
+    if (track && typeof track.id === 'number') await session.ipc.setProperty('aid', track.id)
   }
   entry.isPaused = false
   await session.ipc.setProperty('pause', false)
-  const client = mediaServerClient
+  const client = jellyfinClient
   if (client) {
     try {
       await client.reportPlaying(reportPayload(session, entry))
@@ -683,7 +729,7 @@ async function startPlayback(request: StartPlaybackRequest): Promise<PlaybackSna
   await stopActivePlayback()
   const queuePlan = await buildQueue(client, request.itemId)
   if (!queuePlan.items.length) throw new Error('没有可播放的剧集')
-  const pipeName = `\\\\.\\pipe\\ember-player-${randomUUID()}`
+  const pipeName = `\\\\.\\pipe\\jellyfin-mpv-player-${randomUUID()}`
   const session: PlaybackSession = {
     sessionId: randomUUID(),
     revision: 0,
@@ -707,6 +753,7 @@ async function startPlayback(request: StartPlaybackRequest): Promise<PlaybackSna
     playlistReady: false,
     audioPreference: request.audioPreference,
     subtitlePreference: request.subtitlePreference,
+    gateway: new PlaybackGateway(client),
   }
   session.mediaSourceId = request.mediaSourceId
   const prepared = await mapWithConcurrency<MediaItem, PreparedEntry | FailedEntry>(queuePlan.items, 4, async (item, index) => {
@@ -720,14 +767,9 @@ async function startPlayback(request: StartPlaybackRequest): Promise<PlaybackSna
   const selectedResult = prepared.find((result) => result.index === queuePlan.startIndex)
   if (!selectedResult || !('entry' in selectedResult)) throw new Error(`当前剧集《${queuePlan.items[queuePlan.startIndex]?.Name || request.itemId}》无法播放：${selectedResult && 'error' in selectedResult ? selectedResult.error : '读取播放信息失败'}`)
   const selectedEntry = selectedResult.entry
-  const firstHeaders = headerSignature(buildMpvHttpHeaders(selectedEntry.source, client.token, client.identity.kind, client.deviceId))
   const playable = prepared.filter((result): result is PreparedEntry => {
     if (!('entry' in result)) {
       session.queueWarnings.push({ itemId: result.item.Id, label: result.item.Name, reason: result.error })
-      return false
-    }
-    if (headerSignature(buildMpvHttpHeaders(result.entry.source, client.token, client.identity.kind, client.deviceId)) !== firstHeaders) {
-      session.queueWarnings.push({ itemId: result.item.Id, label: result.item.Name, reason: '所需 HTTP 请求头与当前播放列表不兼容' })
       return false
     }
     return true
@@ -743,7 +785,7 @@ async function startPlayback(request: StartPlaybackRequest): Promise<PlaybackSna
     '--force-window=immediate',
     '--resume-playback=no',
     '--keep-open=yes',
-    '--title=Ember Player',
+    '--title=Jellyfin MPV Player',
     '--msg-level=all=warn',
     `--input-ipc-server=${pipeName}`,
   ]
@@ -772,10 +814,11 @@ async function startPlayback(request: StartPlaybackRequest): Promise<PlaybackSna
     if (!session.stopped && !session.finalizePromise) void finishSession(session, code === 0 ? 'quit' : 'error', false)
   })
   try {
+    await session.gateway.start()
     await attachMpvIpc(session)
     const playlistUrl = buildHexPlaylistUrl(playable.map((result) => ({ item: queueItem(result.item), url: buildStreamUrl(session, result.entry) })))
     await session.ipc.setProperty('pause', true)
-    await session.ipc.setProperty('http-header-fields', buildMpvHttpHeaders(selectedEntry.source, client.token, client.identity.kind, client.deviceId))
+    await session.ipc.setProperty('http-header-fields', [])
     await session.ipc.send(['keybind', 'MBTN_RIGHT', 'script-binding', 'select/select-playlist'])
     await session.ipc.send(['keybind', 'Ctrl+E', 'script-binding', 'select/select-playlist'])
     await session.ipc.send(['loadlist', playlistUrl, 'append'])
@@ -889,12 +932,11 @@ function registerIpc(): void {
   })
   ipcMain.handle('settings:get', () => publicSettings())
   ipcMain.handle('settings:save', async (_event, input: { serverUrl: string; username: string; mpvPath: string }) => {
-    const nextUrl = normalizeServerUrl(input.serverUrl)
+    const nextUrl = normalizeServerUrl(requireText(input?.serverUrl, '服务器地址'))
     if (nextUrl !== storedSettings.serverUrl) {
       await stopActivePlayback()
-      mediaServerClient = null
+      jellyfinClient = null
       storedSettings.userId = undefined
-      storedSettings.serverKind = undefined
       storedSettings.serverName = undefined
       storedSettings.serverVersion = undefined
       storedSettings.encryptedToken = undefined
@@ -902,35 +944,32 @@ function registerIpc(): void {
       inFlightImageRequests.clear()
     }
     storedSettings.serverUrl = nextUrl
-    storedSettings.username = input.username.trim()
-    storedSettings.mpvPath = normalizeMpvPath(input.mpvPath)
+    storedSettings.username = requireText(input?.username, '用户名')
+    storedSettings.mpvPath = normalizeMpvPath(requireText(input?.mpvPath || storedSettings.mpvPath, 'MPV 路径'))
     persistSettings()
     return publicSettings()
   })
-  ipcMain.handle('media:login', async (_event, input: { serverUrl: string; username: string; password: string; mpvPath: string }) => {
-    const inspected = await MediaServerClient.inspect(input.serverUrl)
-    const username = input.username.trim()
-    if (!username) throw new Error('用户名不能为空')
-    const result = await MediaServerClient.authenticate(inspected.baseUrl, username, input.password, inspected.identity, storedSettings.deviceId)
+  ipcMain.handle('jellyfin:login', async (_event, input: { serverUrl: string; username: string; password: string; mpvPath: string }) => {
+    const inspected = await JellyfinClient.inspect(requireText(input?.serverUrl, '服务器地址'))
+    const username = requireText(input?.username, '用户名')
+    const result = await JellyfinClient.authenticate(inspected.baseUrl, username, typeof input?.password === 'string' ? input.password : '', inspected.identity, storedSettings.deviceId)
     storedSettings.serverUrl = result.baseUrl
     storedSettings.username = username
     storedSettings.userId = result.User.Id
-    storedSettings.serverKind = result.identity.kind
     storedSettings.serverName = result.identity.name
     storedSettings.serverVersion = result.identity.version
-    storedSettings.mpvPath = normalizeMpvPath(input.mpvPath)
+    storedSettings.mpvPath = normalizeMpvPath(requireText(input?.mpvPath || storedSettings.mpvPath, 'MPV 路径'))
     storedSettings.encryptedToken = safeStorage.isEncryptionAvailable()
       ? safeStorage.encryptString(result.AccessToken).toString('base64')
       : undefined
-    mediaServerClient = new MediaServerClient(result.baseUrl, result.AccessToken, result.User.Id, result.identity, storedSettings.deviceId)
+    jellyfinClient = new JellyfinClient(result.baseUrl, result.AccessToken, result.User.Id, result.identity, storedSettings.deviceId)
     persistSettings()
     return { settings: publicSettings(), user: result.User }
   })
-  ipcMain.handle('media:logout', async () => {
+  ipcMain.handle('jellyfin:logout', async () => {
     await stopActivePlayback()
-    mediaServerClient = null
+    jellyfinClient = null
     storedSettings.userId = undefined
-    storedSettings.serverKind = undefined
     storedSettings.serverName = undefined
     storedSettings.serverVersion = undefined
     storedSettings.encryptedToken = undefined
@@ -939,23 +978,25 @@ function registerIpc(): void {
     inFlightImageRequests.clear()
     return publicSettings()
   })
-  ipcMain.handle('media:get-views', () => getClient().getViews())
-  ipcMain.handle('media:get-items', (_event, query) => getClient().getItems(query || {}))
-  ipcMain.handle('media:get-movie-recommendations', () => getClient().getMovieRecommendations())
-  ipcMain.handle('media:get-item', (_event, itemId: string) => getClient().getItem(itemId))
-  ipcMain.handle('media:get-playback-info', (_event, itemId: string) => getClient().getPlaybackInfo(itemId))
-  ipcMain.handle('media:get-next-up', (_event, seriesId?: string) => getClient().getNextUp(seriesId))
-  ipcMain.handle('media:get-series-episodes', (_event, seriesId: string) => getClient().getSeriesEpisodes(seriesId))
-  ipcMain.handle('media:get-image', async (_event, request: { itemId: string; imageType?: string; tag?: string; maxWidth?: number }) => {
+  ipcMain.handle('jellyfin:get-views', () => getClient().getViews())
+  ipcMain.handle('jellyfin:get-items', (_event, query) => getClient().getItems(query || {}))
+  ipcMain.handle('jellyfin:get-movie-recommendations', () => getClient().getMovieRecommendations())
+  ipcMain.handle('jellyfin:get-item', (_event, itemId: string) => getClient().getItem(requireText(itemId, '媒体 ID')))
+  ipcMain.handle('jellyfin:get-playback-info', (_event, itemId: string, request?: PlaybackInfoRequest) => getClient().getPlaybackInfo(requireText(itemId, '媒体 ID'), request))
+  ipcMain.handle('jellyfin:get-next-up', (_event, seriesId?: string) => getClient().getNextUp(seriesId ? requireText(seriesId, '剧集 ID') : undefined))
+  ipcMain.handle('jellyfin:get-series-episodes', (_event, seriesId: string) => getClient().getSeriesEpisodes(requireText(seriesId, '剧集 ID')))
+  ipcMain.handle('jellyfin:get-image', async (_event, request: { itemId: string; imageType?: string; tag?: string; maxWidth?: number }) => {
+    const itemId = requireText(request?.itemId, '媒体 ID')
     const client = getClient()
-    const key = JSON.stringify(request)
+    const safeRequest = { itemId, imageType: request.imageType, tag: request.tag, maxWidth: request.maxWidth }
+    const key = JSON.stringify(safeRequest)
     const cached = readCachedImage(key)
     if (cached) return cached
     const pending = inFlightImageRequests.get(key)
     if (pending) return pending
-    const requestPromise = client.getImage(request.itemId, request.imageType || 'Primary', request.tag, request.maxWidth || 480)
+    const requestPromise = client.getImage(itemId, request.imageType || 'Primary', request.tag, request.maxWidth || 480)
       .then((image) => {
-        if (mediaServerClient === client) writeCachedImage(key, image)
+        if (jellyfinClient === client) writeCachedImage(key, image)
         return image
       })
       .finally(() => {

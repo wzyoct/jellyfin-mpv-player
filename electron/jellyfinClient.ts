@@ -10,15 +10,14 @@ import type {
   PlaybackReportPayload,
   QueryResult,
   RecommendationDto,
-  MediaServerIdentity,
-  MediaServerKind,
+  JellyfinIdentity,
+  PlaybackInfoRequest,
 } from '../src/types'
 
 export type { MediaSourceInfo, PlaybackInfo } from '../src/types'
 
-const CLIENT_HEADER = `MediaBrowser Client="Ember Player", Device="Windows", Version="${packageInfo.version}"`
 const REQUEST_TIMEOUT_MS = 15_000
-const CLIENT_NAME = 'Ember Player'
+const CLIENT_NAME = 'Jellyfin MPV Player'
 const DEVICE_NAME = 'Windows'
 
 export interface AuthResponse {
@@ -35,13 +34,13 @@ interface PublicSystemInfo {
   Version?: string | null
 }
 
-export function mediaServerLabel(kind?: MediaServerKind): string {
-  return kind === 'jellyfin' ? 'Jellyfin' : kind === 'emby' ? 'Emby' : '媒体服务器'
+export function jellyfinLabel(): string {
+  return 'Jellyfin'
 }
 
-export function buildMediaServerAuthorization(kind: MediaServerKind, token: string, deviceId = 'ember-player'): string {
+export function buildJellyfinAuthorization(token: string, deviceId = 'jellyfin-mpv-player'): string {
   const clientHeader = `MediaBrowser Client=\"${encodeURIComponent(CLIENT_NAME)}\", Device=\"${encodeURIComponent(DEVICE_NAME)}\", DeviceId=\"${encodeURIComponent(deviceId)}\", Version=\"${encodeURIComponent(packageInfo.version)}\"`
-  return kind === 'jellyfin' && token ? `${clientHeader}, Token=\"${encodeURIComponent(token)}\"` : clientHeader
+  return token ? `${clientHeader}, Token=\"${encodeURIComponent(token)}\"` : clientHeader
 }
 
 function parseVersion(version: string): [number, number] | undefined {
@@ -50,24 +49,19 @@ function parseVersion(version: string): [number, number] | undefined {
   return [Number(match[1]), Number(match[2])]
 }
 
-export function identifyMediaServer(info: PublicSystemInfo): MediaServerIdentity {
+export function identifyJellyfin(info: PublicSystemInfo): JellyfinIdentity {
   const productName = typeof info.ProductName === 'string' ? info.ProductName.trim() : ''
   const version = typeof info.Version === 'string' ? info.Version.trim() : ''
   if (!version) throw new Error('媒体服务器未返回有效版本号')
 
-  if (/jellyfin/i.test(productName)) {
-    const parsed = parseVersion(version)
-    if (!parsed || parsed[0] !== 10 || parsed[1] !== 11) {
-      throw new Error(`当前 Jellyfin 版本为 ${version}，Ember Player 0.9.0 需要 Jellyfin 10.11.x`)
-    }
-    return { kind: 'jellyfin', name: info.ServerName?.trim() || 'Jellyfin Server', version }
+  if (!/jellyfin/i.test(productName)) {
+    throw new Error(`当前地址不是 Jellyfin 服务（${productName || '未知产品'}）`)
   }
-
-  if (/emby/i.test(productName) || (!productName && parseVersion(version)?.[0] === 4)) {
-    return { kind: 'emby', name: info.ServerName?.trim() || 'Emby Server', version }
+  const parsed = parseVersion(version)
+  if (!parsed || parsed[0] !== 10 || parsed[1] !== 11) {
+    throw new Error(`当前 Jellyfin 版本为 ${version}，Jellyfin MPV Player 1.0.0 需要 Jellyfin 10.11.x`)
   }
-
-  throw new Error(`无法识别媒体服务器（${productName || '未知产品'} ${version}）`)
+  return { name: info.ServerName?.trim() || 'Jellyfin Server', version }
 }
 
 function parseQueryResult<T>(value: unknown, endpoint: string): QueryResult<T> {
@@ -85,10 +79,22 @@ function parseQueryResult<T>(value: unknown, endpoint: string): QueryResult<T> {
   }
 }
 
+function parsePlaybackInfo(value: unknown): PlaybackInfo {
+  if (!value || typeof value !== 'object') throw new Error('Jellyfin 播放信息返回格式无效')
+  const result = value as Partial<PlaybackInfo>
+  if (result.MediaSources !== undefined && !Array.isArray(result.MediaSources)) throw new Error('Jellyfin 播放信息缺少有效媒体源列表')
+  const sources = (result.MediaSources || []).map((source) => {
+    if (!source || typeof source !== 'object' || typeof source.Id !== 'string' || !source.Id.trim()) throw new Error('Jellyfin 播放信息包含无效媒体源')
+    if (source.MediaStreams !== undefined && !Array.isArray(source.MediaStreams)) throw new Error(`Jellyfin 媒体源 ${source.Id} 包含无效轨道列表`)
+    return source
+  })
+  return { MediaSources: sources, PlaySessionId: typeof result.PlaySessionId === 'string' ? result.PlaySessionId : undefined }
+}
+
 export function normalizeServerUrl(rawUrl: string): string {
   let value = rawUrl.trim()
   if (!value) {
-    throw new Error('请输入 Jellyfin 或 Emby 服务器地址')
+    throw new Error('请输入 Jellyfin 服务器地址')
   }
   if (!/^https?:\/\//i.test(value)) {
     if (/^[a-z][a-z\d+.-]*:\/\//i.test(value)) throw new Error('服务器地址仅支持 HTTP 或 HTTPS')
@@ -108,14 +114,14 @@ export function normalizeServerUrl(rawUrl: string): string {
   return parsed.toString().replace(/\/$/, '')
 }
 
-export class MediaServerClient {
+export class JellyfinClient {
   readonly baseUrl: string
   readonly token: string
   readonly userId: string
   readonly deviceId: string
-  readonly identity: MediaServerIdentity
+  readonly identity: JellyfinIdentity
 
-  constructor(baseUrl: string, token: string, userId: string, identity: MediaServerIdentity, deviceId = 'ember-player') {
+  constructor(baseUrl: string, token: string, userId: string, identity: JellyfinIdentity, deviceId = 'jellyfin-mpv-player') {
     this.baseUrl = normalizeServerUrl(baseUrl)
     this.token = token
     this.userId = userId
@@ -123,7 +129,7 @@ export class MediaServerClient {
     this.deviceId = deviceId
   }
 
-  static async inspect(baseUrl: string): Promise<{ baseUrl: string; identity: MediaServerIdentity }> {
+  static async inspect(baseUrl: string): Promise<{ baseUrl: string; identity: JellyfinIdentity }> {
     const normalizedUrl = normalizeServerUrl(baseUrl)
     let response: Response
     try {
@@ -141,18 +147,18 @@ export class MediaServerClient {
       throw new Error('媒体服务器返回的公开信息格式无效')
     }
     const finalUrl = response.url.replace(/\/System\/Info\/Public\/?$/i, '') || normalizedUrl
-    return { baseUrl: normalizeServerUrl(finalUrl), identity: identifyMediaServer(info) }
+    return { baseUrl: normalizeServerUrl(finalUrl), identity: identifyJellyfin(info) }
   }
 
-  static async authenticate(baseUrl: string, username: string, password: string, identity: MediaServerIdentity, deviceId = 'ember-player'): Promise<AuthResponse & { identity: MediaServerIdentity; baseUrl: string }> {
-    const client = new MediaServerClient(baseUrl, '', '', identity, deviceId)
+  static async authenticate(baseUrl: string, username: string, password: string, identity: JellyfinIdentity, deviceId = 'jellyfin-mpv-player'): Promise<AuthResponse & { identity: JellyfinIdentity; baseUrl: string }> {
+    const client = new JellyfinClient(baseUrl, '', '', identity, deviceId)
     const result = await client.request<AuthResponse>('/Users/AuthenticateByName', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ Username: username, Pw: password }),
     })
     if (!result || typeof result.AccessToken !== 'string' || !result.AccessToken.trim() || !result.User || typeof result.User.Id !== 'string' || !result.User.Id.trim() || typeof result.User.Name !== 'string' || !result.User.Name.trim()) {
-      throw new Error(`${mediaServerLabel(identity.kind)} 登录响应缺少有效用户或令牌`)
+      throw new Error('Jellyfin 登录响应缺少有效用户或令牌')
     }
     return { ...result, identity, baseUrl: client.baseUrl }
   }
@@ -161,7 +167,7 @@ export class MediaServerClient {
     const method = init.method || 'GET'
     const endpoint = path.split('?')[0]
     const startedAt = Date.now()
-    logger.info('media-server', 'request-start', { kind: this.identity.kind, method, endpoint })
+    logger.info('jellyfin', 'request-start', { method, endpoint })
     const headers = new Headers(init.headers)
     headers.set('Accept', 'application/json')
     this.setAuthorization(headers)
@@ -172,27 +178,27 @@ export class MediaServerClient {
     try {
       response = await fetch(this.resolveUrl(path), { ...init, headers, signal: init.signal || controller.signal })
     } catch (error) {
-      logger.error('media-server', 'request-failed', error, { kind: this.identity.kind, method, endpoint, durationMs: Date.now() - startedAt })
+      logger.error('jellyfin', 'request-failed', error, { method, endpoint, durationMs: Date.now() - startedAt })
       throw error
     } finally {
       clearTimeout(timer)
     }
     if (!response.ok) {
       const body = await response.text().catch(() => '')
-      logger.warn('media-server', 'request-failed', { kind: this.identity.kind, method, endpoint, status: response.status, durationMs: Date.now() - startedAt })
-      throw new Error(`${mediaServerLabel(this.identity.kind)} 请求失败（${response.status}）：${body.slice(0, 180) || response.statusText}`)
+      logger.warn('jellyfin', 'request-failed', { method, endpoint, status: response.status, durationMs: Date.now() - startedAt })
+      throw new Error(`Jellyfin 请求失败（${response.status}）：${body.slice(0, 180) || response.statusText}`)
     }
 
     if (response.status === 204) {
-      logger.info('media-server', 'request-complete', { kind: this.identity.kind, method, endpoint, status: response.status, durationMs: Date.now() - startedAt })
+      logger.info('jellyfin', 'request-complete', { method, endpoint, status: response.status, durationMs: Date.now() - startedAt })
       return undefined as T
     }
     try {
       const result = await response.json() as T
-      logger.info('media-server', 'request-complete', { kind: this.identity.kind, method, endpoint, status: response.status, durationMs: Date.now() - startedAt })
+      logger.info('jellyfin', 'request-complete', { method, endpoint, status: response.status, durationMs: Date.now() - startedAt })
       return result
     } catch (error) {
-      logger.error('media-server', 'response-parse-failed', error, { kind: this.identity.kind, method, endpoint, status: response.status, durationMs: Date.now() - startedAt })
+      logger.error('jellyfin', 'response-parse-failed', error, { method, endpoint, status: response.status, durationMs: Date.now() - startedAt })
       throw error
     }
   }
@@ -200,7 +206,7 @@ export class MediaServerClient {
   async requestBinary(path: string): Promise<{ mimeType: string; data: string }> {
     const endpoint = path.split('?')[0]
     const startedAt = Date.now()
-    logger.info('media-server', 'binary-request-start', { kind: this.identity.kind, method: 'GET', endpoint })
+    logger.info('jellyfin', 'binary-request-start', { method: 'GET', endpoint })
     const headers = new Headers()
     this.setAuthorization(headers)
     const controller = new AbortController()
@@ -209,22 +215,22 @@ export class MediaServerClient {
     try {
       response = await fetch(this.resolveUrl(path), { headers, signal: controller.signal })
     } catch (error) {
-      logger.error('media-server', 'binary-request-failed', error, { kind: this.identity.kind, endpoint, durationMs: Date.now() - startedAt })
+      logger.error('jellyfin', 'binary-request-failed', error, { endpoint, durationMs: Date.now() - startedAt })
       throw error
     } finally {
       clearTimeout(timer)
     }
     if (!response.ok) {
-      logger.warn('media-server', 'binary-request-failed', { kind: this.identity.kind, endpoint, status: response.status, durationMs: Date.now() - startedAt })
-      throw new Error(`${mediaServerLabel(this.identity.kind)} 图片请求失败（${response.status}）`)
+      logger.warn('jellyfin', 'binary-request-failed', { endpoint, status: response.status, durationMs: Date.now() - startedAt })
+      throw new Error(`Jellyfin 图片请求失败（${response.status}）`)
     }
     const contentType = response.headers.get('content-type') || 'image/jpeg'
     try {
       const buffer = Buffer.from(await response.arrayBuffer())
-      logger.info('media-server', 'binary-request-complete', { kind: this.identity.kind, endpoint, status: response.status, durationMs: Date.now() - startedAt })
+      logger.info('jellyfin', 'binary-request-complete', { endpoint, status: response.status, durationMs: Date.now() - startedAt })
       return { mimeType: contentType, data: buffer.toString('base64') }
     } catch (error) {
-      logger.error('media-server', 'binary-response-read-failed', error, { kind: this.identity.kind, endpoint, status: response.status, durationMs: Date.now() - startedAt })
+      logger.error('jellyfin', 'binary-response-read-failed', error, { endpoint, status: response.status, durationMs: Date.now() - startedAt })
       throw error
     }
   }
@@ -288,7 +294,7 @@ export class MediaServerClient {
     })
     const value = await this.request(`/Movies/Recommendations?${params.toString()}`)
     if (!Array.isArray(value)) {
-      throw new Error(`${mediaServerLabel(this.identity.kind)} 接口 /Movies/Recommendations 返回格式无效`)
+      throw new Error('Jellyfin 接口 /Movies/Recommendations 返回格式无效')
     }
     return value as RecommendationDto[]
   }
@@ -304,9 +310,42 @@ export class MediaServerClient {
     return this.request(`/Users/${encodeURIComponent(this.userId)}/Items/${encodeURIComponent(itemId)}?${params.toString()}`)
   }
 
-  async getPlaybackInfo(itemId: string): Promise<PlaybackInfo> {
-    const params = new URLSearchParams({ UserId: this.userId })
-    return this.request(`/Items/${encodeURIComponent(itemId)}/PlaybackInfo?${params.toString()}`)
+  async getPlaybackInfo(itemId: string, options: PlaybackInfoRequest = {}): Promise<PlaybackInfo> {
+    const body = {
+      UserId: this.userId,
+      DeviceProfile: {
+        Name: 'Jellyfin MPV Player',
+        MaxStreamingBitrate: 100_000_000,
+        MaxStaticBitrate: 100_000_000,
+        DirectPlayProfiles: [
+          { Type: 'Video', VideoCodec: '*', AudioCodec: '*', Container: '*' },
+          { Type: 'Audio', AudioCodec: '*', Container: '*' },
+        ],
+        TranscodingProfiles: [
+          { Type: 'Video', Container: 'ts', AudioCodec: 'aac,mp3,ac3,eac3,opus,flac', VideoCodec: 'h264,hevc,vp9,av1', Protocol: 'hls', Context: 'Streaming', EnableMpegtsM2TsMode: true },
+        ],
+        SubtitleProfiles: [
+          ...['srt', 'ass', 'ssa', 'smi', 'vtt'].map((Format) => ({ Format, Method: 'External' })),
+          ...['sub', 'sup', 'pgs', 'dvdsub', 'dvbsub'].map((Format) => ({ Format, Method: 'Embed' })),
+        ],
+      },
+      EnableDirectPlay: true,
+      EnableDirectStream: true,
+      EnableTranscoding: true,
+      AllowVideoStreamCopy: true,
+      AllowAudioStreamCopy: true,
+      AutoOpenLiveStream: true,
+      StartTimeTicks: Math.max(0, options.startTimeTicks || 0),
+      ...(options.mediaSourceId ? { MediaSourceId: options.mediaSourceId } : {}),
+      ...(options.audioStreamIndex !== undefined ? { AudioStreamIndex: options.audioStreamIndex } : {}),
+      ...(options.subtitleStreamIndex !== undefined ? { SubtitleStreamIndex: options.subtitleStreamIndex } : {}),
+    }
+    const value = await this.request(`/Items/${encodeURIComponent(itemId)}/PlaybackInfo`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    return parsePlaybackInfo(value)
   }
 
   async getNextUp(seriesId?: string): Promise<ItemResult> {
@@ -376,23 +415,17 @@ export class MediaServerClient {
     subtitleStreamIndex?: number
     playSessionId?: string
   }): string {
-    const rawUrl = source.DirectStreamUrl || `/Videos/${encodeURIComponent(itemId)}/stream`
+    const rawUrl = source.DirectStreamUrl || source.TranscodingUrl || `/Videos/${encodeURIComponent(itemId)}/stream`
     const url = new URL(this.resolveUrl(rawUrl))
-    for (const key of [...url.searchParams.keys()]) {
-      if (/^(?:api[_-]?key|access[_-]?token|x[-_]emby[-_]token|x[-_]mediabrowser[-_]token|token)$/i.test(key)) url.searchParams.delete(key)
-    }
-    if (!source.DirectStreamUrl) {
+    // The URL stays inside the loopback gateway. Keeping server-issued query
+    // parameters is required for MediaWarp's short-lived redirect route.
+    if (!source.DirectStreamUrl && !source.TranscodingUrl) {
       url.searchParams.set('MediaSourceId', source.Id)
       url.searchParams.set('Static', 'true')
     }
     if (options.audioStreamIndex !== undefined) url.searchParams.set('AudioStreamIndex', String(options.audioStreamIndex))
     if (options.subtitleStreamIndex !== undefined) url.searchParams.set('SubtitleStreamIndex', String(options.subtitleStreamIndex))
     if (options.playSessionId) url.searchParams.set('PlaySessionId', options.playSessionId)
-    return url.toString()
-  }
-
-  buildSubtitleUrl(itemId: string, mediaSourceId: string, subtitleIndex: number): string {
-    const url = new URL(this.resolveUrl(`/Videos/${encodeURIComponent(itemId)}/${encodeURIComponent(mediaSourceId)}/Subtitles/${subtitleIndex}/Stream.srt`))
     return url.toString()
   }
 
@@ -420,16 +453,11 @@ export class MediaServerClient {
     })
   }
 
-  private setAuthorization(headers: Headers): void {
-    if (this.identity.kind === 'jellyfin') {
-      headers.set('Authorization', buildMediaServerAuthorization(this.identity.kind, this.token, this.deviceId))
-      return
-    }
-    headers.set('X-Emby-Authorization', this.clientHeader())
-    if (this.token) headers.set('X-MediaBrowser-Token', this.token)
+  buildAuthorization(): string {
+    return buildJellyfinAuthorization(this.token, this.deviceId)
   }
 
-  private clientHeader(): string {
-    return `${CLIENT_HEADER}, DeviceId="${this.deviceId}"`
+  private setAuthorization(headers: Headers): void {
+    headers.set('Authorization', this.buildAuthorization())
   }
 }

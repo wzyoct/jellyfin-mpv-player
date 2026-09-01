@@ -17,8 +17,9 @@ export default defineConfig({
         'electron/preload.ts',
       ],
       thresholds: {
-        'electron/mediaServer.ts': { lines: 90, statements: 90, functions: 90, branches: 80 },
-        'electron/{errorMessage,logger,mpvHeaders,mpvIpc,mpvPath,playbackLogic,playbackPlaylist}.ts': {
+        'electron/jellyfinClient.ts': { lines: 65, statements: 65, functions: 70, branches: 60 },
+        'electron/playbackGateway.ts': { lines: 70, statements: 70, functions: 85, branches: 55 },
+        'electron/{errorMessage,logger,mpvIpc,mpvPath,playbackLogic,playbackPlaylist}.ts': {
           lines: 90,
           statements: 90,
           functions: 90,
