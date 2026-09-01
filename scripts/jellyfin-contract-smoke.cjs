@@ -10,11 +10,20 @@ const identity = { name: 'Jellyfin Server', version: '10.11.11' }
 global.fetch = async (url, init) => {
   lastUrl = String(url)
   lastInit = init
+  if (lastUrl.endsWith('/MediaWarp/version')) {
+    return new Response(JSON.stringify({ app_version: '0.2.4' }), { status: 200, headers: { 'content-type': 'application/json' } })
+  }
+  if (lastUrl.endsWith('/System/Info/Public')) {
+    return new Response(JSON.stringify({ ProductName: 'Jellyfin Server', ServerName: 'Smoke Jellyfin', Version: '10.11.11' }), { status: 200, headers: { 'content-type': 'application/json' } })
+  }
   return new Response(JSON.stringify(responseBody), { status: 200, headers: { 'content-type': 'application/json' } })
 }
 
 async function run() {
-  const client = new JellyfinClient('http://127.0.0.1:8096', 'token', 'user', identity)
+  const inspected = await JellyfinClient.inspect('http://127.0.0.1:9000')
+  assert.equal(inspected.mediaWarpVersion, '0.2.4')
+  assert.equal(inspected.identity.version, '10.11.11')
+  const client = new JellyfinClient(inspected.baseUrl, 'token', 'user', identity)
   responseBody = { Items: [{ Id: 'view-1', Name: '电影', CollectionType: 'movies' }], TotalRecordCount: 1 }
   assert.deepEqual(await client.getViews(), responseBody.Items)
   assert.match(lastUrl, /\/Users\/user\/Views$/)
