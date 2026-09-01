@@ -99,7 +99,17 @@ export class PlaybackGateway {
     const server = this.server
     this.server = undefined
     this.port = 0
-    if (server) await new Promise<void>((resolve) => server.close(() => resolve()))
+    if (server) await new Promise<void>((resolve) => {
+      let settled = false
+      const finish = () => {
+        if (settled) return
+        settled = true
+        resolve()
+      }
+      server.close(finish)
+      server.closeAllConnections?.()
+      setTimeout(finish, 1000)
+    })
   }
 
   private async handle(request: IncomingMessage, response: ServerResponse): Promise<void> {
