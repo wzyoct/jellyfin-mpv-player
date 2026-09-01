@@ -14,4 +14,13 @@ describe('buildMpvHttpHeaders', () => {
       'X-MediaBrowser-Token: secret-token',
     ])
   })
+
+  it('filters nullish required header values while always adding the token header', () => {
+    const source = {
+      Id: 'source-2',
+      RequiredHttpHeaders: { Keep: 'value', Empty: undefined, Missing: null },
+    } as unknown as MediaSourceInfo
+
+    expect(buildMpvHttpHeaders(source, '')).toEqual(['Keep: value', 'X-MediaBrowser-Token: '])
+  })
 })

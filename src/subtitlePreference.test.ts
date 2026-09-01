@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { chooseDefaultSubtitle } from './subtitlePreference'
+import { chooseDefaultSubtitle, isChineseSubtitle, isExternalSubtitle, isSimplifiedChineseSubtitle } from './subtitlePreference'
 import type { MediaStream } from './types'
 
 function subtitle(index: number, options: Partial<MediaStream> = {}): MediaStream {
@@ -51,5 +51,16 @@ describe('chooseDefaultSubtitle', () => {
   it('returns undefined when no subtitle is available', () => {
     expect(chooseDefaultSubtitle([{ Type: 'Audio', Index: 0 }])).toBeUndefined()
     expect(chooseDefaultSubtitle([subtitle(6, { Language: 'ja' })])).toBeUndefined()
+  })
+
+  it('recognizes language codes, labels and external subtitle flags', () => {
+    expect(isChineseSubtitle(subtitle(1, { Language: 'zh_TW' }))).toBe(true)
+    expect(isChineseSubtitle(subtitle(2, { DisplayTitle: 'Mandarin' }))).toBe(true)
+    expect(isChineseSubtitle(subtitle(3, { Language: 'en', Title: 'English' }))).toBe(false)
+    expect(isSimplifiedChineseSubtitle(subtitle(4, { Language: 'zh_SG' }))).toBe(true)
+    expect(isSimplifiedChineseSubtitle(subtitle(5, { Title: 'Simplified' }))).toBe(true)
+    expect(isSimplifiedChineseSubtitle(subtitle(6, { Language: 'zh-TW', Title: '繁体' }))).toBe(false)
+    expect(isExternalSubtitle(subtitle(7, { IsExternalUrl: true }))).toBe(true)
+    expect(isExternalSubtitle(subtitle(8))).toBe(false)
   })
 })

@@ -26,4 +26,11 @@ describe('playback playlist', () => {
     })
     expect(peak).toBeLessThanOrEqual(2)
   })
+
+  it('handles empty playlists and clamps invalid concurrency limits', async () => {
+    expect(buildM3u([])).toBe('#EXTM3U\n')
+    expect(buildHexPlaylistUrl([])).toBe(`hex://${Buffer.from('#EXTM3U\n').toString('hex')}`)
+    await expect(mapWithConcurrency([], 0, async () => 1)).resolves.toEqual([])
+    await expect(mapWithConcurrency([1, 2], -1, async (value) => value)).resolves.toEqual([1, 2])
+  })
 })

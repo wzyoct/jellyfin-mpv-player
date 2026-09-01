@@ -54,4 +54,17 @@ describe('AppLogger', () => {
     expect(existsSync(join(directory, 'ember-player.log.4'))).toBe(true)
     expect(existsSync(join(directory, 'ember-player.log.5'))).toBe(false)
   })
+
+  it('serializes non-Error failures and ignores writes before initialization', () => {
+    const logger = new AppLogger()
+    expect(logger.getDirectory()).toBe('')
+    expect(() => logger.error('test', 'before-init', 'plain failure')).not.toThrow()
+    const directory = mkdtempSync(join(tmpdir(), 'ember-logger-error-'))
+    logger.initialize(directory)
+    logger.warn('test', 'warning')
+    logger.error('test', 'non-error', 'plain failure', { token: 'secret' })
+    const line = readFileSync(join(directory, 'ember-player.log'), 'utf8')
+    expect(line).toContain('plain failure')
+    expect(line).toContain('[REDACTED]')
+  })
 })

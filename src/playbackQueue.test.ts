@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildEpisodeQueue } from './playbackQueue'
+import { buildEpisodeQueue, compareEpisodes } from './playbackQueue'
 import type { EmbyItem } from './types'
 
 function episode(id: string, season: number, number: number): EmbyItem {
@@ -58,5 +58,15 @@ describe('buildEpisodeQueue', () => {
     const virtual = { ...episode('virtual', 1, 2), LocationType: 'Virtual' as const }
     const plan = buildEpisodeQueue([selected, virtual], selected)
     expect(plan.items.map((item) => item.Id)).toEqual(['s1e1'])
+  })
+})
+
+describe('compareEpisodes', () => {
+  it('orders missing episode numbers after numbered episodes and breaks ties by name', () => {
+    const base = { Id: '1', Name: 'A', Type: 'Episode' as const, ParentIndexNumber: 1 }
+    expect(compareEpisodes({ ...base, IndexNumber: 1 }, { ...base, IndexNumber: 2 })).toBeLessThan(0)
+    expect(compareEpisodes({ ...base, Name: 'A' }, { ...base, Name: 'B' })).toBeLessThan(0)
+    expect(compareEpisodes({ ...base, IndexNumber: undefined }, { ...base, IndexNumber: 2 })).toBeGreaterThan(0)
+    expect(compareEpisodes({ ...base, ParentIndexNumber: 1 }, { ...base, ParentIndexNumber: 2 })).toBeLessThan(0)
   })
 })

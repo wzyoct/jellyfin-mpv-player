@@ -58,4 +58,20 @@ describe('mediaPresentation', () => {
       ariaLabel: '打开 测试剧 · 未编号单集',
     })
   })
+
+  it('handles movies, series, seasons and unknown item types without metadata', () => {
+    expect(mediaPresentation(item({ Type: 'Movie', Name: '无年份电影' })).subtitle).toBe('电影')
+    expect(mediaPresentation(item({ Type: 'Series', Name: '剧集' })).subtitle).toBe('剧集')
+    expect(mediaPresentation(item({ Type: 'Season', Name: '季度', IndexNumber: 2 })).subtitle).toBe('第 2 季')
+    expect(mediaPresentation(item({ Type: 'Season', Name: '季度' })).subtitle).toBe('季度')
+    expect(mediaPresentation(item({ Type: 'Documentary', Name: '纪录片' })).subtitle).toBe('Documentary')
+    expect(itemTypeLabel(item({ Type: 'Documentary', Name: '纪录片' }))).toBe('Documentary')
+  })
+
+  it('does not duplicate an already normalized episode name', () => {
+    const numbered = item({ Type: 'Episode', Name: '第 3 集', ParentIndexNumber: 1, IndexNumber: 3 })
+    expect(mediaPresentation(numbered).title).toBe('第 3 集')
+    const unnamed = item({ Type: 'Episode', Name: '   ', ParentIndexNumber: 0, IndexNumber: 0 })
+    expect(mediaPresentation(unnamed).title).toBe('特别篇 · 单集')
+  })
 })
