@@ -14,16 +14,40 @@ function addSource(sources: PosterSource[], source: PosterSource): void {
   sources.push(source)
 }
 
-export function resolvePosterSource(item: EmbyItem, mode: PosterMode = 'item'): PosterSource {
+export function resolvePosterSources(item: EmbyItem, mode: PosterMode = 'item'): PosterSource[] {
+  const sources: PosterSource[] = []
   if (mode === 'series' && item.Type === 'Episode' && item.SeriesId) {
-    return {
+    addSource(sources, {
       itemId: item.SeriesId,
       imageType: 'Primary',
       tag: item.SeriesPrimaryImageTag,
+    })
+    if (item.SeasonId) {
+      addSource(sources, { itemId: item.SeasonId, imageType: 'Primary' })
     }
+    addSource(sources, {
+      itemId: item.Id,
+      imageType: 'Primary',
+      tag: item.ImageTags?.Primary,
+    })
+    addSource(sources, {
+      itemId: item.ParentThumbItemId || '',
+      imageType: 'Thumb',
+      tag: item.ParentThumbImageTag,
+    })
+    return sources
   }
 
-  return {
+  addSource(sources, {
+    itemId: item.Id,
+    imageType: 'Primary',
+    tag: item.ImageTags?.Primary,
+  })
+  return sources
+}
+
+export function resolvePosterSource(item: EmbyItem, mode: PosterMode = 'item'): PosterSource {
+  return resolvePosterSources(item, mode)[0] || {
     itemId: item.Id,
     imageType: 'Primary',
     tag: item.ImageTags?.Primary,

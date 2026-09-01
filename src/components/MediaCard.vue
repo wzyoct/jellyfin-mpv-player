@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import PosterImage from './PosterImage.vue'
-import { resolvePosterSource, type PosterMode } from '../posterSource'
+import { resolvePosterSources, type PosterMode } from '../posterSource'
 import { mediaPresentation } from '../mediaPresentation'
 import type { EmbyItem } from '../types'
 
@@ -26,14 +26,14 @@ const progress = computed(() => {
   return Math.min(100, Math.round((position / props.item.RunTimeTicks) * 100))
 })
 
-const posterSource = computed(() => resolvePosterSource(props.item, props.posterMode))
+const posterSources = computed(() => resolvePosterSources(props.item, props.posterMode))
 const presentation = computed(() => mediaPresentation(props.item))
 </script>
 
 <template>
   <button class="poster-card" type="button" :aria-label="presentation.ariaLabel" @click="$emit('select', item)">
     <span class="poster-art">
-      <PosterImage :item="item" :source="posterSource" :eager="eager" />
+      <PosterImage :item="item" :sources="posterSources" :eager="eager" />
       <span
         v-if="showProgress && progress"
         class="poster-progress"

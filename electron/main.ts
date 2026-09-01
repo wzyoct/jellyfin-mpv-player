@@ -118,6 +118,7 @@ let lastSnapshot: PlaybackSnapshot = {
   queueWarnings: [],
 }
 const imageCache = new Map<string, string>()
+const inFlightImageRequests = new Map<string, Promise<string>>()
 const IMAGE_CACHE_LIMIT = 120
 
 function readCachedImage(key: string): string | undefined {
@@ -892,6 +893,7 @@ function registerIpc(): void {
     storedSettings.encryptedToken = undefined
     persistSettings()
     imageCache.clear()
+    inFlightImageRequests.clear()
     return publicSettings()
   })
   ipcMain.handle('emby:get-views', () => getClient().getViews())
@@ -906,9 +908,18 @@ function registerIpc(): void {
     const key = JSON.stringify(request)
     const cached = readCachedImage(key)
     if (cached) return cached
-    const image = await client.getImage(request.itemId, request.imageType || 'Primary', request.tag, request.maxWidth || 480)
-    writeCachedImage(key, image)
-    return image
+    const pending = inFlightImageRequests.get(key)
+    if (pending) return pending
+    const requestPromise = client.getImage(request.itemId, request.imageType || 'Primary', request.tag, request.maxWidth || 480)
+      .then((image) => {
+        if (embyClient === client) writeCachedImage(key, image)
+        return image
+      })
+      .finally(() => {
+        inFlightImageRequests.delete(key)
+      })
+    inFlightImageRequests.set(key, requestPromise)
+    return requestPromise
   })
   ipcMain.handle('mpv:validate', (_event, mpvPath?: string) => {
     const result = validateMpvPath(mpvPath)

@@ -39,9 +39,10 @@ describe('PosterImage', () => {
     expect(getImage).toHaveBeenCalledWith({ itemId: 'item-1', imageType: 'Primary', tag: 'primary-1', maxWidth: 480 })
     expect(wrapper.get('img').attributes('src')).toBe('data:image/jpeg;base64,poster')
     expect(wrapper.get('img').attributes('alt')).toBe('测试媒体')
-    expect(loaded).toHaveBeenCalledWith('data:image/jpeg;base64,poster')
+    expect(loaded).not.toHaveBeenCalled()
     await wrapper.get('img').trigger('load')
-    expect(loaded).toHaveBeenCalledTimes(2)
+    expect(loaded).toHaveBeenCalledTimes(1)
+    expect(loaded).toHaveBeenCalledWith('data:image/jpeg;base64,poster')
   })
 
   it('uses an explicit maximum width when provided', async () => {
@@ -52,6 +53,29 @@ describe('PosterImage', () => {
     await flushPromises()
 
     expect(getImage).toHaveBeenCalledWith({ itemId: 'item-1', imageType: 'Primary', tag: 'primary-1', maxWidth: 3840 })
+  })
+
+  it('falls back from a missing series poster to the season poster', async () => {
+    const getImage = vi.mocked(window.emby.getImage)
+    getImage.mockImplementation(async (request) => {
+      if (request.itemId === 'series-1') throw new Error('series poster unavailable')
+      return `data:image/jpeg;base64,${request.itemId}`
+    })
+    const wrapper = mount(PosterImage, {
+      props: {
+        item: item({ Type: 'Episode' }),
+        sources: [
+          { itemId: 'series-1', imageType: 'Primary', tag: 'series-tag' },
+          { itemId: 'season-1', imageType: 'Primary' },
+        ],
+        eager: true,
+      },
+    })
+
+    await flushPromises()
+
+    expect(getImage.mock.calls.map(([request]) => request.itemId)).toEqual(['series-1', 'season-1'])
+    expect(wrapper.get('img').attributes('src')).toBe('data:image/jpeg;base64,season-1')
   })
 
   it('tries the next backdrop candidate when an earlier image fails', async () => {
@@ -78,6 +102,7 @@ describe('PosterImage', () => {
 
     expect(getImage.mock.calls.map(([request]) => request.itemId)).toEqual(['item-1', 'season-1'])
     expect(wrapper.get('img').attributes('src')).toBe('data:image/jpeg;base64,season')
+    await wrapper.get('img').trigger('load')
     expect(loaded).toHaveBeenCalled()
   })
 
@@ -159,6 +184,31 @@ describe('PosterImage', () => {
     await wrapper.setProps({ item: item({ ImageTags: { Primary: 'new-tag' } }) })
     await flushPromises()
     expect(observe).toHaveBeenCalledTimes(2)
+  })
+
+  it('restarts loading when eager mode changes after a list refresh', async () => {
+    let callback: IntersectionObserverCallback | undefined
+    const observe = vi.fn()
+    class FakeIntersectionObserver {
+      constructor(next: IntersectionObserverCallback) {
+        callback = next
+      }
+
+      disconnect = vi.fn()
+      observe = observe
+    }
+    window.IntersectionObserver = FakeIntersectionObserver as unknown as typeof IntersectionObserver
+    const getImage = vi.mocked(window.emby.getImage)
+    getImage.mockResolvedValue('data:image/jpeg;base64,refreshed')
+    const wrapper = mount(PosterImage, { props: { item: item(), eager: false } })
+
+    expect(getImage).not.toHaveBeenCalled()
+    await wrapper.setProps({ eager: true, item: item({ ImageTags: { Primary: 'refreshed-tag' } }) })
+    await flushPromises()
+
+    expect(callback).toBeDefined()
+    expect(getImage).toHaveBeenCalledWith({ itemId: 'item-1', imageType: 'Primary', tag: 'refreshed-tag', maxWidth: 480 })
+    expect(wrapper.get('img').attributes('src')).toBe('data:image/jpeg;base64,refreshed')
   })
 
   it('ignores a stale image result after the item changes', async () => {

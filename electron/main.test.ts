@@ -247,6 +247,21 @@ describe('Electron main process IPC orchestration', () => {
     await expect(handler('emby:get-image')({}, request)).resolves.toBe('data:image/png;base64,AQID')
     expect(mocks.fetchMock).toHaveBeenCalledTimes(2)
     expect(mocks.fetchMock.mock.calls[1][0]).toContain('/Items/item-1/Images/Primary')
+
+    let resolveImage!: (response: Response) => void
+    const pendingImage = new Promise<Response>((resolve) => { resolveImage = resolve })
+    mocks.fetchMock.mockReturnValueOnce(pendingImage)
+    const concurrentRequest = { itemId: 'item-2', imageType: 'Primary', tag: 'tag-2', maxWidth: 480 }
+    const first = handler('emby:get-image')({}, concurrentRequest)
+    const second = handler('emby:get-image')({}, concurrentRequest)
+    await flush()
+    expect(mocks.fetchMock).toHaveBeenCalledTimes(3)
+    resolveImage(new Response(Uint8Array.from([4, 5, 6]), { status: 200, headers: { 'content-type': 'image/png' } }))
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      'data:image/png;base64,BAUG',
+      'data:image/png;base64,BAUG',
+    ])
+    expect(mocks.fetchMock).toHaveBeenCalledTimes(3)
   })
 
   it('starts a resumed movie and drives MPV progress and completion events', async () => {

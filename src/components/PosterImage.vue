@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { Film, ImageOff } from 'lucide-vue-next'
-import { resolveBackdropSources, resolvePosterSource, type PosterSource } from '../posterSource'
+import { resolveBackdropSources, resolvePosterSources, type PosterSource } from '../posterSource'
 import type { EmbyItem } from '../types'
+
+const IMAGE_REQUEST_TIMEOUT_MS = 20_000
 
 const props = withDefaults(defineProps<{
   item: EmbyItem
@@ -10,6 +12,7 @@ const props = withDefaults(defineProps<{
   eager?: boolean
   maxWidth?: number
   source?: PosterSource
+  sources?: PosterSource[]
 }>(), {
   variant: 'poster',
   eager: false,
@@ -36,7 +39,8 @@ async function loadImage(): Promise<void> {
   activeCandidateIndex.value = -1
   const candidates = props.variant === 'backdrop'
     ? await buildBackdropCandidates()
-    : [props.source || resolvePosterSource(props.item)]
+    : props.sources?.length ? props.sources : props.source ? [props.source] : resolvePosterSources(props.item)
+  if (requestId !== loadRequestId) return
   imageCandidates.value = candidates
   if (!candidates.length) {
     loading.value = false
@@ -76,24 +80,30 @@ async function loadCandidate(requestId: number, index: number): Promise<void> {
   }
   activeCandidateIndex.value = index
   try {
-    const nextImageUrl = await window.emby.getImage({
-      itemId: candidate.itemId,
-      imageType: candidate.imageType,
-      tag: candidate.tag,
-      maxWidth: props.maxWidth || (props.variant === 'backdrop' ? 1280 : 480),
+    let timeoutId: ReturnType<typeof setTimeout> | undefined
+    const nextImageUrl = await Promise.race([
+      window.emby.getImage({
+        itemId: candidate.itemId,
+        imageType: candidate.imageType,
+        tag: candidate.tag,
+        maxWidth: props.maxWidth || (props.variant === 'backdrop' ? 1280 : 480),
+      }),
+      new Promise<string>((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error('图片请求超时')), IMAGE_REQUEST_TIMEOUT_MS)
+      }),
+    ]).finally(() => {
+      if (timeoutId) clearTimeout(timeoutId)
     })
+    if (!nextImageUrl) throw new Error('图片地址为空')
     if (requestId === loadRequestId) imageUrl.value = nextImageUrl
   } catch {
     await loadCandidate(requestId, index + 1)
     return
   }
-  if (requestId === loadRequestId) {
-    loading.value = false
-    emit('loaded', imageUrl.value)
-  }
 }
 
 function handleImageError(): void {
+  if (!imageUrl.value) return
   imageUrl.value = ''
   const nextIndex = activeCandidateIndex.value + 1
   if (nextIndex < imageCandidates.value.length) {
@@ -105,6 +115,12 @@ function handleImageError(): void {
   }
 }
 
+function handleImageLoaded(): void {
+  if (!imageUrl.value) return
+  loading.value = false
+  emit('loaded', imageUrl.value)
+}
+
 function startLoading(): void {
   if (loadStarted.value) return
   loadStarted.value = true
@@ -112,6 +128,7 @@ function startLoading(): void {
 }
 
 function resetImage(): void {
+  loadRequestId += 1
   loadStarted.value = false
   imageUrl.value = ''
   imageCandidates.value = []
@@ -124,17 +141,16 @@ function resetImage(): void {
 }
 
 onMounted(() => {
-  if (props.eager || !('IntersectionObserver' in window)) {
-    startLoading()
-    return
+  if ('IntersectionObserver' in window) {
+    observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) {
+        observer?.disconnect()
+        startLoading()
+      }
+    }, { rootMargin: '320px 0px' })
+    if (imageRoot.value) observer.observe(imageRoot.value)
   }
-  observer = new IntersectionObserver((entries) => {
-    if (entries.some((entry) => entry.isIntersecting)) {
-      observer?.disconnect()
-      startLoading()
-    }
-  }, { rootMargin: '320px 0px' })
-  if (imageRoot.value) observer.observe(imageRoot.value)
+  if (props.eager || !observer) startLoading()
 })
 
 onUnmounted(() => observer?.disconnect())
@@ -151,12 +167,14 @@ watch(() => [
   props.item.SeriesPrimaryImageTag,
   props.source?.itemId,
   props.source?.tag,
+  props.sources?.map((source) => `${source.itemId}:${source.imageType}:${source.tag || ''}`).join('|'),
+  props.eager,
 ], resetImage)
 </script>
 
 <template>
   <div ref="imageRoot" class="poster-image" :class="[`poster-image--${variant}`, { 'is-loading': loading, 'has-image': imageUrl }]">
-    <img v-if="imageUrl" :src="imageUrl" :alt="item.Name" @load="loading = false; emit('loaded', imageUrl)" @error="handleImageError" />
+    <img v-if="imageUrl" :src="imageUrl" :alt="item.Name" @load="handleImageLoaded" @error="handleImageError" />
     <div v-else class="poster-placeholder">
       <ImageOff v-if="!loading" :size="variant === 'backdrop' ? 32 : 24" stroke-width="1.4" />
       <Film v-else :size="variant === 'backdrop' ? 32 : 24" stroke-width="1.4" />

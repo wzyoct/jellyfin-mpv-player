@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { resolveBackdropSources, resolvePosterSource } from './posterSource'
+import { resolveBackdropSources, resolvePosterSource, resolvePosterSources } from './posterSource'
 import type { EmbyItem } from './types'
 
 describe('resolvePosterSource', () => {
@@ -25,6 +25,43 @@ describe('resolvePosterSource', () => {
     }
 
     expect(resolvePosterSource(episode, 'series')).toEqual({ itemId: 'series-1', imageType: 'Primary', tag: 'series-tag' })
+  })
+
+  it('orders series poster fallbacks before the episode thumbnail', () => {
+    const episode: EmbyItem = {
+      Id: 'episode-1',
+      Name: 'Episode',
+      Type: 'Episode',
+      SeriesId: 'series-1',
+      SeasonId: 'season-1',
+      SeriesPrimaryImageTag: 'series-tag',
+      ImageTags: { Primary: 'episode-tag' },
+      ParentThumbItemId: 'series-1',
+      ParentThumbImageTag: 'thumb-tag',
+    }
+
+    expect(resolvePosterSources(episode, 'series')).toEqual([
+      { itemId: 'series-1', imageType: 'Primary', tag: 'series-tag' },
+      { itemId: 'season-1', imageType: 'Primary' },
+      { itemId: 'episode-1', imageType: 'Primary', tag: 'episode-tag' },
+      { itemId: 'series-1', imageType: 'Thumb', tag: 'thumb-tag' },
+    ])
+  })
+
+  it('deduplicates a parent thumbnail that points to the series', () => {
+    const episode: EmbyItem = {
+      Id: 'episode-1',
+      Name: 'Episode',
+      Type: 'Episode',
+      SeriesId: 'series-1',
+      ParentThumbItemId: 'series-1',
+    }
+
+    expect(resolvePosterSources(episode, 'series')).toEqual([
+      { itemId: 'series-1', imageType: 'Primary' },
+      { itemId: 'episode-1', imageType: 'Primary' },
+      { itemId: 'series-1', imageType: 'Thumb' },
+    ])
   })
 
   it('keeps the episode image when series metadata is unavailable', () => {
