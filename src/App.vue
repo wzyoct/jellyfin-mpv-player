@@ -123,6 +123,7 @@ const activeView = computed(() => views.value.find((view) => view.Id === activeV
 const heroItems = computed(() => recommendationItems.value.length ? recommendationItems.value : latestItems.value.slice(0, 8))
 const heroIndex = ref(0)
 const heroItem = computed(() => heroItems.value[heroIndex.value] || heroItems.value[0])
+const isImmersiveHome = computed(() => activePage.value === 'home' && Boolean(heroItem.value))
 const heroDisplayedItem = ref<EmbyItem>()
 const heroOutgoingItem = ref<EmbyItem>()
 const heroLoadedId = ref('')
@@ -841,7 +842,7 @@ onUnmounted(() => {
 
 <template>
   <div class="app-shell" :class="{ 'app-shell--standalone': !isConnected && appBooted, 'app-shell--booting': !appBooted }">
-    <header v-if="isConnected" class="topbar" :class="{ 'topbar--scrolled': isContentScrolled }">
+    <header v-if="isConnected" class="topbar" :class="{ 'topbar--scrolled': isContentScrolled, 'topbar--immersive': isImmersiveHome }">
       <button class="brand" type="button" aria-label="返回首页" @click="goHome">
         <span class="brand-mark">E</span>
         <span class="brand-copy">EMBER<span>PLAYER</span></span>
@@ -1065,22 +1066,24 @@ onUnmounted(() => {
           <p v-if="recommendationError" class="hero-note">推荐暂时不可用，当前展示最近加入内容</p>
         </section>
 
-        <div v-if="homeError" class="error-banner"><AlertCircle :size="18" />{{ homeError }}<button class="text-button" type="button" @click="loadHome">重试</button></div>
-        <div v-if="homeLoading && !heroItem" class="loading-state"><LoaderCircle class="spin" :size="24" />正在加载媒体库</div>
-        <div v-else-if="!homeLoading && !homeError && !heroItem" class="empty-state home-empty-state"><Clapperboard :size="32" /><h3>还没有可展示的内容</h3><p>请确认 Emby 媒体库已完成扫描，并检查当前账号权限。</p><button class="button button--ghost" type="button" @click="loadHome"><RefreshCw :size="16" />重新加载</button></div>
+        <div class="home-feed" :class="{ 'home-feed--immersive': isImmersiveHome }">
+          <div v-if="homeError" class="error-banner"><AlertCircle :size="18" />{{ homeError }}<button class="text-button" type="button" @click="loadHome">重试</button></div>
+          <div v-if="homeLoading && !heroItem" class="loading-state"><LoaderCircle class="spin" :size="24" />正在加载媒体库</div>
+          <div v-else-if="!homeLoading && !homeError && !heroItem" class="empty-state home-empty-state"><Clapperboard :size="32" /><h3>还没有可展示的内容</h3><p>请确认 Emby 媒体库已完成扫描，并检查当前账号权限。</p><button class="button button--ghost" type="button" @click="loadHome"><RefreshCw :size="16" />重新加载</button></div>
 
-        <MediaRail v-if="continueItems.length" title="继续观看" :items="continueItems" poster-mode="series" @select="openDetails" />
-        <MediaRail v-if="nextUpItems.length" title="下一集" :items="nextUpItems" poster-mode="series" @select="openDetails" />
-        <MediaRail v-if="latestItems.length" title="最近加入" :items="latestItems" :show-progress="false" @select="openDetails" />
+          <MediaRail v-if="continueItems.length" title="继续观看" :items="continueItems" poster-mode="series" @select="openDetails" />
+          <MediaRail v-if="nextUpItems.length" title="下一集" :items="nextUpItems" poster-mode="series" @select="openDetails" />
+          <MediaRail v-if="latestItems.length" title="最近加入" :items="latestItems" :show-progress="false" @select="openDetails" />
 
-        <section v-if="homeAllItems.length" class="library-shelves">
-          <div class="library-shelves-heading">
-            <div><p class="eyebrow">YOUR LIBRARY</p><h2>完整媒体库</h2></div>
-            <span class="section-count">{{ homeAllItems.length }} 项内容 · {{ views.length }} 个集合</span>
-          </div>
-          <MediaRail v-if="homeMovieItems.length" title="Movie · 电影" :items="homeMovieItems" :count="homeMovieItems.length" :show-progress="false" @select="openDetails" />
-          <MediaRail v-if="homeShowItems.length" title="Show · 剧集" :items="homeShowItems" :count="homeShowItems.length" :show-progress="false" @select="openDetails" />
-        </section>
+          <section v-if="homeAllItems.length" class="library-shelves">
+            <div class="library-shelves-heading">
+              <div><p class="eyebrow">YOUR LIBRARY</p><h2>完整媒体库</h2></div>
+              <span class="section-count">{{ homeAllItems.length }} 项内容 · {{ views.length }} 个集合</span>
+            </div>
+            <MediaRail v-if="homeMovieItems.length" title="Movie · 电影" :items="homeMovieItems" :count="homeMovieItems.length" :show-progress="false" @select="openDetails" />
+            <MediaRail v-if="homeShowItems.length" title="Show · 剧集" :items="homeShowItems" :count="homeShowItems.length" :show-progress="false" @select="openDetails" />
+          </section>
+        </div>
       </template>
 
       <section v-else class="library-page">

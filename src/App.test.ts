@@ -145,6 +145,7 @@ describe('App', () => {
     const wrapper = mountApp(api)
     await flushPromises()
 
+    expect(wrapper.get('header.topbar').classes()).toContain('topbar--immersive')
     expect(wrapper.text()).toContain('推荐电影')
     expect(wrapper.text()).toContain('继续观看')
     expect(wrapper.text()).toContain('下一集')
@@ -183,6 +184,7 @@ describe('App', () => {
     await flushPromises()
 
     await wrapper.findAll('button.nav-item')[3].trigger('click')
+    expect(wrapper.get('header.topbar').classes()).not.toContain('topbar--immersive')
     expect(wrapper.text()).toContain('更新记录')
     await wrapper.get('button.brand').trigger('click')
     await wrapper.get('button[title="设置"]').trigger('click')
