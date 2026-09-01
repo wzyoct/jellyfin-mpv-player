@@ -9,8 +9,9 @@ import { buildMpvHttpHeaders } from './mpvHeaders'
 import { normalizeMpvPath } from './mpvPath'
 import { logger } from './logger'
 import { buildEpisodeQueue } from '../src/playbackQueue'
+import { buildHexPlaylistUrl, headerSignature, mapWithConcurrency } from './playbackPlaylist'
 import { chooseDefaultSubtitle } from '../src/subtitlePreference'
-import { isResumePositionReached, resolveResumeTicks, shouldAdvanceAfterEnd } from './playbackLogic'
+import { isResumePositionReached, resolveResumeTicks } from './playbackLogic'
 import type {
   AudioPreference,
   EmbyItem,
@@ -20,6 +21,7 @@ import type {
   PlaybackQueueItem,
   PlaybackReportPayload,
   PlaybackSnapshot,
+  PlaybackQueueWarning,
   PlaybackPhase,
   StartPlaybackRequest,
   SubtitlePreference,
@@ -46,6 +48,10 @@ interface PlaybackEntry extends PlaybackQueueItem {
   audioStreamIndex?: number
   subtitleStreamIndex?: number
   finalized: boolean
+  initialResumeTicks: number
+  playlistEntryId?: number
+  playlistIndex?: number
+  loaded: boolean
 }
 
 interface PlaybackSession {
@@ -62,15 +68,34 @@ interface PlaybackSession {
   progressTimer: NodeJS.Timeout
   progressPromise?: Promise<void>
   finalizePromise?: Promise<void>
-  loadingNext: boolean
-  transitioning: boolean
   stopAfterCurrent: boolean
   stopped: boolean
+  queueWarnings: PlaybackQueueWarning[]
+  playlistEntryIds: Map<number, number>
+  queueIndexByPlaylistId: Map<number, number>
+  eventChain: Promise<void>
+  pendingTransition: boolean
+  stopRequested: boolean
+  idleFinishTimer?: NodeJS.Timeout
+  playlistTrimmed: boolean
+  playlistReady: boolean
   syncError?: string
   endReason?: string
   audioPreference?: AudioPreference
   subtitlePreference?: SubtitlePreference
   mediaSourceId?: string
+}
+
+interface PreparedEntry {
+  index: number
+  item: EmbyItem
+  entry: PlaybackEntry
+}
+
+interface FailedEntry {
+  index: number
+  item: EmbyItem
+  error: string
 }
 
 let mainWindow: BrowserWindow | null = null
@@ -90,6 +115,7 @@ let lastSnapshot: PlaybackSnapshot = {
   queue: [],
   currentIndex: -1,
   positionTicks: 0,
+  queueWarnings: [],
 }
 const imageCache = new Map<string, string>()
 const IMAGE_CACHE_LIMIT = 120
@@ -164,19 +190,31 @@ function resolveMpvPath(candidate?: string): string {
   return normalizeMpvPath(selected)
 }
 
-function validateMpvPath(candidate?: string): { path: string; version?: string; message: string } {
+function parseMpvVersion(output: string): { raw?: string; supported: boolean } {
+  const match = output.match(/(?:mpv\s+)?v?(\d+)\.(\d+)(?:\.(\d+))?/i)
+  if (!match) return { supported: false }
+  const major = Number(match[1])
+  const minor = Number(match[2])
+  const patch = Number(match[3] || 0)
+  return { raw: match[0].trim(), supported: major > 0 || minor >= 41 || (major === 0 && minor === 41 && patch >= 0) }
+}
+
+function validateMpvPath(candidate?: string): { valid: boolean; path: string; version?: string; message: string } {
   const mpvPath = resolveMpvPath(candidate)
   const result = spawnSync(mpvPath, ['--version'], { windowsHide: true, encoding: 'utf8', timeout: 5000 })
   if (result.error || result.status !== 0) {
-    return { path: mpvPath, message: `找不到可用的 MPV：${mpvPath}` }
+    return { valid: false, path: mpvPath, message: `找不到可用的 MPV：${mpvPath}` }
   }
   const output = `${result.stdout || ''}\n${result.stderr || ''}`
-  return { path: mpvPath, version: output.split(/\r?\n/).find((line) => line.trim())?.trim(), message: 'MPV 路径有效' }
+  const version = parseMpvVersion(output)
+  const rawVersion = output.split(/\r?\n/).find((line) => line.trim())?.trim()
+  if (!version.supported) return { valid: false, path: mpvPath, version: rawVersion, message: 'MPV 版本过低，需要 0.41 或更新版本' }
+  return { valid: true, path: mpvPath, version: rawVersion, message: 'MPV 路径和版本有效' }
 }
 
-function testMpvPath(candidate?: string): { path: string; version?: string; message: string } {
+function testMpvPath(candidate?: string): { valid: boolean; path: string; version?: string; message: string } {
   const validation = validateMpvPath(candidate)
-  if (!validation.version) return validation
+  if (!validation.valid) return validation
   const child = spawn(validation.path, ['--idle=yes', '--force-window=no', '--no-video', '--no-audio'], { windowsHide: true, stdio: 'ignore' })
   setTimeout(() => { if (!child.killed) child.kill() }, 700)
   return { ...validation, message: 'MPV 测试启动成功' }
@@ -213,9 +251,9 @@ function queueItem(item: EmbyItem): PlaybackQueueItem {
   }
 }
 
-async function buildQueue(client: EmbyClient, itemId: string): Promise<EmbyItem[]> {
+async function buildQueue(client: EmbyClient, itemId: string): Promise<{ items: EmbyItem[]; startIndex: number }> {
   const selected = await client.getItem(itemId)
-  if (selected.Type !== 'Episode' || !selected.SeriesId) return [selected]
+  if (selected.Type !== 'Episode' || !selected.SeriesId) return { items: [selected], startIndex: 0 }
 
   const episodes = (await client.getSeriesEpisodes(selected.SeriesId)).filter((item) => item.LocationType?.toLowerCase() !== 'virtual')
   return buildEpisodeQueue(episodes, selected)
@@ -262,6 +300,8 @@ async function prepareEntry(session: PlaybackSession, item: EmbyItem, startTimeT
     audioStreamIndex,
     subtitleStreamIndex,
     finalized: false,
+    initialResumeTicks: Math.max(0, startTimeTicks),
+    loaded: false,
   }
 }
 
@@ -280,6 +320,7 @@ function snapshotFor(session: PlaybackSession | null): PlaybackSnapshot {
     isPaused: entry?.isPaused,
     endReason: session.endReason,
     syncError: session.syncError,
+    queueWarnings: session.queueWarnings,
   }
 }
 
@@ -296,7 +337,7 @@ function emitPlayback(type: PlaybackEvent['type'], session: PlaybackSession | nu
   return snapshot
 }
 
-function reportPayload(session: PlaybackSession, entry: PlaybackEntry, eventName?: PlaybackProgressEvent): PlaybackReportPayload {
+function reportPayload(session: PlaybackSession, entry: PlaybackEntry, eventName?: PlaybackProgressEvent, playlistIndex = entry.playlistIndex ?? session.currentIndex): PlaybackReportPayload {
   return {
     ItemId: entry.itemId,
     MediaSourceId: entry.source.Id,
@@ -307,7 +348,7 @@ function reportPayload(session: PlaybackSession, entry: PlaybackEntry, eventName
     CanSeek: true,
     AudioStreamIndex: entry.audioStreamIndex,
     SubtitleStreamIndex: entry.subtitleStreamIndex,
-    PlaylistIndex: session.currentIndex,
+    PlaylistIndex: playlistIndex,
     PlaylistLength: session.queue.length,
     QueueableMediaTypes: ['Video'],
     ...(eventName ? { EventName: eventName } : {}),
@@ -347,9 +388,8 @@ async function reportActiveProgress(force = false, eventName: PlaybackProgressEv
   await promise
 }
 
-async function readLatestMpvState(session: PlaybackSession): Promise<void> {
-  const entry = session.currentEntry
-  if (!entry) return
+async function readLatestMpvState(session: PlaybackSession, entry: PlaybackEntry): Promise<void> {
+  if (session.currentEntry !== entry) return
   try {
     const [position, duration, paused] = await Promise.all([
       session.ipc.getProperty('time-pos', 800),
@@ -368,23 +408,26 @@ async function readLatestMpvState(session: PlaybackSession): Promise<void> {
   }
 }
 
-async function finalizeEntry(session: PlaybackSession, reason: string, keepProcess: boolean): Promise<void> {
-  const entry = session.currentEntry
+async function finalizeEntry(session: PlaybackSession, entry: PlaybackEntry, reason: string, keepProcess: boolean): Promise<void> {
   if (!entry || entry.finalized) return
   logger.info('playback', 'finalize-entry', { sessionId: session.sessionId, itemId: entry.itemId, reason, keepProcess })
-  await readLatestMpvState(session)
+  await readLatestMpvState(session, entry)
   session.endReason = reason
   if (reason === 'eof' && entry.durationSeconds !== undefined) {
     entry.positionSeconds = Math.max(entry.positionSeconds, entry.durationSeconds)
     entry.positionObserved = true
     entry.positionFresh = true
   }
-  await reportActiveProgress(true, 'TimeUpdate')
+  try {
+    await reportEntryProgress(session, entry, true, 'TimeUpdate')
+  } catch (error) {
+    session.syncError = error instanceof Error ? error.message : 'Emby 进度上报失败'
+  }
   if (!entry.positionObserved && !session.syncError) session.syncError = '未能取得 MPV 的最终播放位置'
   const client = embyClient
   if (client) {
     try {
-      await client.reportStopped(reportPayload(session, entry))
+      await client.reportStopped(reportPayload(session, entry, undefined, entry.playlistIndex ?? session.currentIndex))
       session.syncError = undefined
     } catch (error) {
       session.syncError = error instanceof Error ? error.message : 'Emby 播放结束状态上报失败'
@@ -401,22 +444,22 @@ async function finishSession(session: PlaybackSession, reason: string, terminate
     return
   }
   session.finalizePromise = (async () => {
-    session.transitioning = true
     session.phase = 'stopping'
     session.endReason = reason
     emitPlayback('snapshot', session)
     clearInterval(session.progressTimer)
     try {
-      await finalizeEntry(session, reason, false)
+      if (session.currentEntry) await finalizeEntry(session, session.currentEntry, reason, false)
     } catch (error) {
       session.syncError = error instanceof Error ? error.message : '播放结束状态上报失败'
     }
     session.stopped = true
+    if (session.idleFinishTimer) clearTimeout(session.idleFinishTimer)
     session.ipc.close()
     if (terminate && !session.process.killed) session.process.kill()
     if (activeSession === session) activeSession = null
     session.phase = reason === 'error' ? 'error' : 'stopped'
-    emitPlayback('snapshot', session, reason === 'eof' ? '播放完成' : reason === 'quit' ? 'MPV 已关闭' : undefined)
+    emitPlayback('snapshot', session, reason === 'eof' ? '播放完成' : reason === 'quit' ? 'MPV 已关闭' : reason === 'error' ? session.syncError : undefined)
   })()
   await session.finalizePromise
 }
@@ -450,82 +493,114 @@ async function seekEntry(session: PlaybackSession, entry: PlaybackEntry, startTi
   throw new Error(`MPV 未能跳转到续播位置（目标 ${Math.round(targetSeconds)} 秒，实际 ${typeof latestPosition === 'number' ? Math.round(latestPosition) : '未知'} 秒）`)
 }
 
-async function loadEntry(session: PlaybackSession, index: number, startTimeTicks = 0): Promise<void> {
-  if (index < 0 || index >= session.queue.length || session.stopped) return
-  const item = session.entries.get(index)?.item || await getClient().getItem(session.queue[index].itemId)
-  const cachedEntry = session.entries.get(index)
-  const entry = cachedEntry && !cachedEntry.finalized
-    ? { ...cachedEntry, positionSeconds: Math.max(0, startTimeTicks / 10_000_000), positionFresh: false, positionObserved: false, isPaused: false }
-    : await prepareEntry(session, item, startTimeTicks)
-  session.entries.set(index, entry)
-  logger.info('playback', 'load-entry', { sessionId: session.sessionId, itemId: entry.itemId, index, resume: startTimeTicks > 0 })
-  session.phase = 'switching'
-  session.loadingNext = true
-  session.transitioning = true
-  try {
-    await session.ipc.setProperty('pause', true)
-    const loaded = session.ipc.waitForEvent(
-      (message) => message.event === 'file-loaded' || message.event === 'end-file' || message.event === 'ipc-closed',
-    )
-    await session.ipc.setProperty('http-header-fields', buildMpvHttpHeaders(entry.source, getClient().token))
-    await session.ipc.send(['loadfile', buildStreamUrl(session, entry), 'replace'])
-    const loadEvent = await loaded
-    if (loadEvent.event !== 'file-loaded') {
-      throw new Error(loadEvent.file_error || `《${entry.name}》加载失败`)
+async function activateLoadedEntry(session: PlaybackSession, entry: PlaybackEntry): Promise<void> {
+  if (entry.loaded || session.stopped) return
+  entry.loaded = true
+  if (entry.initialResumeTicks > 0) await seekEntry(session, entry, entry.initialResumeTicks)
+  if (entry.subtitleStreamIndex !== undefined) {
+    const subtitle = entry.source.MediaStreams?.find((stream) => stream.Type === 'Subtitle' && stream.Index === entry.subtitleStreamIndex)
+    if (!subtitle || subtitle.IsTextSubtitleStream !== false) {
+      await session.ipc.send(['sub-add', getClient().buildSubtitleUrl(entry.itemId, entry.source.Id, entry.subtitleStreamIndex), 'select']).catch(() => undefined)
     }
-    session.currentIndex = index
-    session.currentEntry = entry
-    if (startTimeTicks > 0) {
-      await seekEntry(session, entry, startTimeTicks)
+  }
+  entry.isPaused = false
+  await session.ipc.setProperty('pause', false)
+  const client = embyClient
+  if (client) {
+    try {
+      await client.reportPlaying(reportPayload(session, entry))
+      session.syncError = undefined
+    } catch (error) {
+      session.syncError = error instanceof Error ? error.message : 'Emby 播放开始状态上报失败'
     }
-    if (entry.subtitleStreamIndex !== undefined) {
-      const subtitle = entry.source.MediaStreams?.find((stream) => stream.Type === 'Subtitle' && stream.Index === entry.subtitleStreamIndex)
-      if (!subtitle || subtitle.IsTextSubtitleStream !== false) {
-        await session.ipc.send(['sub-add', getClient().buildSubtitleUrl(entry.itemId, entry.source.Id, entry.subtitleStreamIndex), 'select']).catch(() => undefined)
-      }
-    }
-    entry.isPaused = false
-    await session.ipc.setProperty('pause', false)
-    const client = embyClient
-    if (client) {
-      try {
-        await client.reportPlaying(reportPayload(session, entry))
-        session.syncError = undefined
-      } catch (error) {
-        session.syncError = error instanceof Error ? error.message : 'Emby 播放开始状态上报失败'
-      }
-    }
-    session.phase = 'playing'
-    logger.info('playback', 'playing', { sessionId: session.sessionId, itemId: entry.itemId, index })
-    emitPlayback('snapshot', session)
-  } finally {
-    session.loadingNext = false
-    session.transitioning = false
+  }
+  session.phase = 'playing'
+  logger.info('playback', 'playing', { sessionId: session.sessionId, itemId: entry.itemId, index: session.currentIndex })
+  emitPlayback('snapshot', session)
+}
+
+async function refreshPlaylistMap(session: PlaybackSession): Promise<void> {
+  const value = await session.ipc.getProperty('playlist')
+  if (!Array.isArray(value)) throw new Error('MPV 未返回有效的播放列表')
+  const list = value as Array<{ id?: unknown }>
+  session.playlistEntryIds.clear()
+  session.queueIndexByPlaylistId.clear()
+  for (let playlistIndex = 0; playlistIndex < list.length; playlistIndex += 1) {
+    const id = list[playlistIndex]?.id
+    const numericId = typeof id === 'number' ? id : undefined
+    const queueIndex = playlistIndex < session.queue.length ? playlistIndex : undefined
+    if (numericId === undefined || queueIndex === undefined) continue
+    const entry = session.entries.get(queueIndex)
+    if (!entry) continue
+    entry.playlistEntryId = numericId
+    entry.playlistIndex = playlistIndex
+    session.playlistEntryIds.set(queueIndex, numericId)
+    session.queueIndexByPlaylistId.set(numericId, queueIndex)
+  }
+  if (session.playlistEntryIds.size !== session.queue.length && !session.playlistTrimmed) {
+    throw new Error('MPV 播放列表条目数量与应用队列不一致')
   }
 }
 
 async function handleEndFile(session: PlaybackSession, message: MpvIpcMessage): Promise<void> {
-  if (session.stopped || session.transitioning || session.loadingNext || !session.currentEntry || session.currentEntry.finalized) return
+  if (session.stopped) return
+  const queueIndex = typeof message.playlist_entry_id === 'number' ? session.queueIndexByPlaylistId.get(message.playlist_entry_id) : session.currentIndex
+  const entry = queueIndex === undefined ? session.currentEntry : session.entries.get(queueIndex)
+  if (!entry || entry.finalized) return
   const reason = message.reason || (message.file_error ? 'error' : 'eof')
-  if (shouldAdvanceAfterEnd({
-    reason,
-    stopAfterCurrent: session.stopAfterCurrent,
-    currentIndex: session.currentIndex,
-    queueLength: session.queue.length,
-    transitioning: session.transitioning || session.loadingNext,
-  })) {
-    session.loadingNext = true
-    session.transitioning = true
-    try {
-      await finalizeEntry(session, 'eof', true)
-      await loadEntry(session, session.currentIndex + 1)
-    } finally {
-      session.loadingNext = false
-      session.transitioning = false
-    }
+  if (reason === 'eof') {
+    await finalizeEntry(session, entry, 'eof', true)
+    const hasNext = queueIndex !== undefined && queueIndex + 1 < session.queue.length && !session.stopAfterCurrent && !session.playlistTrimmed
+    if (!hasNext) await finishSession(session, 'eof', true)
     return
   }
+  if (reason === 'stop' && !session.stopRequested) {
+    await finalizeEntry(session, entry, session.pendingTransition ? 'skip' : 'stop', true)
+    if (session.pendingTransition) return
+    if (session.idleFinishTimer) clearTimeout(session.idleFinishTimer)
+    session.idleFinishTimer = setTimeout(() => {
+      if (!session.stopped && !session.currentEntry?.loaded) void finishSession(session, 'stop', true)
+    }, 600)
+    return
+  }
+  if (reason === 'error') session.syncError = `《${entry.name}》加载失败：${message.file_error || 'MPV 返回加载错误'}`
   await finishSession(session, reason, true)
+  emitPlayback('error', session, session.syncError)
+}
+
+async function handleMpvEvent(session: PlaybackSession, message: MpvIpcMessage): Promise<void> {
+  if (message.event === 'start-file') {
+    if (session.idleFinishTimer) clearTimeout(session.idleFinishTimer)
+    const id = message.playlist_entry_id
+    const index = typeof id === 'number' ? session.queueIndexByPlaylistId.get(id) : undefined
+    const entry = index === undefined ? undefined : session.entries.get(index)
+    if (!entry) {
+      session.phase = 'error'
+      session.syncError = 'MPV 返回了未知的播放列表条目'
+      emitPlayback('error', session, session.syncError)
+      return
+    }
+    if (index === undefined) return
+    if (session.currentEntry === entry && entry.loaded) return
+    session.currentIndex = index
+    session.currentEntry = entry
+    session.pendingTransition = false
+    entry.loaded = false
+    session.phase = 'switching'
+    emitPlayback('snapshot', session)
+    return
+  }
+  if (message.event === 'file-loaded') {
+    if (session.currentEntry) await activateLoadedEntry(session, session.currentEntry)
+    return
+  }
+  if (message.event === 'end-file') {
+    await handleEndFile(session, message)
+    return
+  }
+  if (message.event === 'property-change' && message.name === 'idle-active' && message.data === true && session.playlistReady && !session.stopRequested && !session.pendingTransition && !session.stopped) {
+    await finishSession(session, 'stop', true)
+  }
 }
 
 async function attachMpvIpc(session: PlaybackSession): Promise<void> {
@@ -547,21 +622,25 @@ async function attachMpvIpc(session: PlaybackSession): Promise<void> {
         void reportActiveProgress(true, message.data ? 'Pause' : 'Unpause')
         emitPlayback('snapshot', session)
       }
-    } else if (message.event === 'end-file' && !session.transitioning) {
-      void handleEndFile(session, message).catch((error) => {
-        session.syncError = error instanceof Error ? error.message : '切换下一集失败'
+    }
+    if (message.event === 'ipc-closed' && !session.stopped && !session.finalizePromise) {
+      session.syncError = 'MPV 进度接口连接已断开'
+      emitPlayback('sync-error', session, session.syncError)
+      return
+    }
+    if (message.event === 'start-file' || message.event === 'file-loaded' || message.event === 'end-file' || (message.event === 'property-change' && message.name === 'idle-active')) {
+      session.eventChain = session.eventChain.then(() => handleMpvEvent(session, message)).catch((error) => {
+        session.syncError = error instanceof Error ? error.message : 'MPV 播放事件处理失败'
         session.phase = 'error'
         emitPlayback('error', session, session.syncError)
       })
-    } else if (message.event === 'ipc-closed' && !session.stopped && !session.finalizePromise) {
-      session.syncError = 'MPV 进度接口连接已断开'
-      emitPlayback('sync-error', session, session.syncError)
     }
   })
   await Promise.all([
     session.ipc.observeProperty(1, 'time-pos'),
     session.ipc.observeProperty(2, 'duration'),
     session.ipc.observeProperty(3, 'pause'),
+    session.ipc.observeProperty(4, 'idle-active'),
   ])
 }
 
@@ -573,43 +652,76 @@ async function stopActivePlayback(): Promise<void> {
 
 async function startPlayback(request: StartPlaybackRequest): Promise<PlaybackSnapshot> {
   const client = getClient()
+  const mpvValidation = validateMpvPath()
+  if (!mpvValidation.valid) throw new Error(mpvValidation.message)
   await stopActivePlayback()
-  const items = await buildQueue(client, request.itemId)
-  if (!items.length) throw new Error('没有可播放的剧集')
-  const selected = items[0]
-  const resumeTicks = resolveResumeTicks(selected, request.startTimeTicks)
+  const queuePlan = await buildQueue(client, request.itemId)
+  if (!queuePlan.items.length) throw new Error('没有可播放的剧集')
   const pipeName = `\\\\.\\pipe\\ember-player-${randomUUID()}`
   const session: PlaybackSession = {
     sessionId: randomUUID(),
     revision: 0,
     phase: 'preparing',
-    queue: items.map(queueItem),
-    currentIndex: 0,
+    queue: [],
+    currentIndex: -1,
     entries: new Map(),
     process: undefined as unknown as ChildProcess,
     pipeName,
     ipc: new MpvIpc(pipeName),
     progressTimer: undefined as unknown as NodeJS.Timeout,
-    loadingNext: false,
-    transitioning: false,
     stopAfterCurrent: false,
     stopped: false,
+    queueWarnings: [],
+    playlistEntryIds: new Map(),
+    queueIndexByPlaylistId: new Map(),
+    eventChain: Promise.resolve(),
+    pendingTransition: false,
+    stopRequested: false,
+    playlistTrimmed: false,
+    playlistReady: false,
     audioPreference: request.audioPreference,
     subtitlePreference: request.subtitlePreference,
   }
   session.mediaSourceId = request.mediaSourceId
-  const firstEntry = await prepareEntry(session, selected, resumeTicks)
-  session.entries.set(0, firstEntry)
+  const prepared = await mapWithConcurrency<EmbyItem, PreparedEntry | FailedEntry>(queuePlan.items, 4, async (item, index) => {
+    try {
+      const entry = await prepareEntry(session, item, index === queuePlan.startIndex ? resolveResumeTicks(item, request.startTimeTicks) : 0)
+      return { index, item, entry }
+    } catch (error) {
+      return { index, item, error: error instanceof Error ? error.message : '读取播放信息失败' }
+    }
+  })
+  const selectedResult = prepared.find((result) => result.index === queuePlan.startIndex)
+  if (!selectedResult || !('entry' in selectedResult)) throw new Error(`当前剧集《${queuePlan.items[queuePlan.startIndex]?.Name || request.itemId}》无法播放：${selectedResult && 'error' in selectedResult ? selectedResult.error : '读取播放信息失败'}`)
+  const selectedEntry = selectedResult.entry
+  const firstHeaders = headerSignature(buildMpvHttpHeaders(selectedEntry.source, client.token))
+  const playable = prepared.filter((result): result is PreparedEntry => {
+    if (!('entry' in result)) {
+      session.queueWarnings.push({ itemId: result.item.Id, label: result.item.Name, reason: result.error })
+      return false
+    }
+    if (headerSignature(buildMpvHttpHeaders(result.entry.source, client.token)) !== firstHeaders) {
+      session.queueWarnings.push({ itemId: result.item.Id, label: result.item.Name, reason: '所需 HTTP 请求头与当前播放列表不兼容' })
+      return false
+    }
+    return true
+  })
+  const selectedPlayable = playable.findIndex((result) => result.index === queuePlan.startIndex)
+  if (selectedPlayable < 0) throw new Error('当前剧集无法加入播放列表')
+  session.queue = playable.map((result) => queueItem(result.item))
+  session.currentIndex = selectedPlayable
+  playable.forEach((result, index) => session.entries.set(index, { ...result.entry, initialResumeTicks: result.entry.positionSeconds * 10_000_000, loaded: false }))
   const args = [
     '--idle=yes',
     '--pause=yes',
     '--force-window=immediate',
     '--resume-playback=no',
+    '--keep-open=yes',
     '--title=Ember Player',
     '--msg-level=all=warn',
     `--input-ipc-server=${pipeName}`,
   ]
-  logger.info('playback', 'start', { sessionId: session.sessionId, queueLength: session.queue.length, resume: resumeTicks > 0 })
+  logger.info('playback', 'start', { sessionId: session.sessionId, queueLength: session.queue.length, resume: selectedEntry.initialResumeTicks > 0 })
   const child = spawn(resolveMpvPath(), args, { windowsHide: false, stdio: ['ignore', 'ignore', 'pipe'] })
   session.process = child
   activeSession = session
@@ -635,7 +747,22 @@ async function startPlayback(request: StartPlaybackRequest): Promise<PlaybackSna
   })
   try {
     await attachMpvIpc(session)
-    await loadEntry(session, 0, resumeTicks)
+    const playlistUrl = buildHexPlaylistUrl(playable.map((result) => ({ item: queueItem(result.item), url: buildStreamUrl(session, result.entry) })))
+    await session.ipc.setProperty('pause', true)
+    await session.ipc.setProperty('http-header-fields', buildMpvHttpHeaders(selectedEntry.source, client.token))
+    await session.ipc.send(['keybind', 'MBTN_RIGHT', 'script-binding', 'select/select-playlist'])
+    await session.ipc.send(['keybind', 'Ctrl+E', 'script-binding', 'select/select-playlist'])
+    await session.ipc.send(['loadlist', playlistUrl, 'append'])
+    await refreshPlaylistMap(session)
+    session.playlistReady = true
+    const selectedPlaylistEntry = session.entries.get(selectedPlayable)
+    if (!selectedPlaylistEntry?.playlistIndex && selectedPlaylistEntry?.playlistIndex !== 0) throw new Error('无法定位当前剧集在 MPV 播放列表中的位置')
+    const loaded = session.ipc.waitForEvent((message) => message.event === 'file-loaded' || message.event === 'end-file' || message.event === 'ipc-closed')
+    await session.ipc.send(['playlist-play-index', selectedPlaylistEntry.playlistIndex])
+    const loadEvent = await loaded
+    if (loadEvent.event !== 'file-loaded') throw new Error(loadEvent.file_error || `《${selectedPlaylistEntry.name}》加载失败`)
+    session.currentEntry = selectedPlaylistEntry
+    await activateLoadedEntry(session, selectedPlaylistEntry)
     return emitPlayback('snapshot', session)
   } catch (error) {
     await finishSession(session, 'error', true)
@@ -648,27 +775,43 @@ async function playbackCommand(request: PlaybackCommand): Promise<PlaybackSnapsh
   if (!session || session.sessionId !== request.sessionId) return lastSnapshot
   try {
     if (request.command === 'stop') {
+      session.stopRequested = true
       await finishSession(session, 'quit', true)
     } else if (request.command === 'stop-after-current') {
       session.stopAfterCurrent = !session.stopAfterCurrent
+      if (session.stopAfterCurrent && session.currentEntry?.playlistIndex !== undefined) {
+        const currentPlaylistIndex = session.currentEntry.playlistIndex
+        const playlist = await session.ipc.getProperty('playlist')
+        if (Array.isArray(playlist)) {
+          for (let index = playlist.length - 1; index > currentPlaylistIndex; index -= 1) await session.ipc.send(['playlist-remove', index])
+          for (let index = session.currentIndex + 1; index < session.queue.length; index += 1) {
+            const entry = session.entries.get(index)
+            if (entry) {
+              entry.playlistEntryId = undefined
+              entry.playlistIndex = undefined
+            }
+          }
+          session.playlistTrimmed = true
+          await refreshPlaylistMap(session)
+        }
+      } else if (!session.stopAfterCurrent && session.playlistTrimmed) {
+        const tail = Array.from(session.entries.entries())
+          .filter(([index, entry]) => index > session.currentIndex && entry.playlistEntryId === undefined)
+          .map(([, entry]) => ({ item: entry, url: buildStreamUrl(session, entry) }))
+        if (tail.length) await session.ipc.send(['loadlist', buildHexPlaylistUrl(tail), 'append'])
+        session.playlistTrimmed = false
+        await refreshPlaylistMap(session)
+      }
       emitPlayback('snapshot', session)
     } else if (request.command === 'pause' || request.command === 'resume') {
       await session.ipc.setProperty('pause', request.command === 'pause')
     } else if (request.command === 'next' || request.command === 'previous') {
       const nextIndex = request.command === 'next' ? session.currentIndex + 1 : session.currentIndex - 1
       if (nextIndex >= 0 && nextIndex < session.queue.length) {
-        await finalizeEntry(session, 'skip', true)
-        session.loadingNext = true
-        session.transitioning = true
-        try {
-          const stopped = session.ipc.waitForEvent((message) => message.event === 'end-file')
-          await session.ipc.send(['stop'])
-          await stopped
-        } finally {
-          session.loadingNext = false
-          session.transitioning = false
-        }
-        await loadEntry(session, nextIndex)
+        session.pendingTransition = true
+        const targetPlaylistIndex = session.entries.get(nextIndex)?.playlistIndex
+        if (targetPlaylistIndex === undefined) throw new Error('目标剧集不在 MPV 播放列表中')
+        await session.ipc.send([request.command === 'next' ? 'playlist-next' : 'playlist-prev'])
       }
     }
   } catch (error) {
@@ -763,11 +906,11 @@ function registerIpc(): void {
   })
   ipcMain.handle('mpv:validate', (_event, mpvPath?: string) => {
     const result = validateMpvPath(mpvPath)
-    return { valid: Boolean(result.version), ...result }
+    return result
   })
   ipcMain.handle('mpv:test', (_event, mpvPath?: string) => {
     const result = testMpvPath(mpvPath)
-    return { valid: Boolean(result.version), ...result }
+    return result
   })
   ipcMain.handle('playback:start', async (_event, request: StartPlaybackRequest) => {
     try {

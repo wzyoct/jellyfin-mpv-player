@@ -2,6 +2,7 @@
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import {
   AlertCircle,
+  AlertTriangle,
   Check,
   ChevronRight,
   CircleUserRound,
@@ -92,6 +93,7 @@ const currentPlaybackId = ref('')
 const currentPlaybackPosition = ref(0)
 const lastPlaybackSyncError = ref('')
 const playbackSnapshot = ref<PlaybackSnapshot>({ revision: 0, phase: 'idle', queue: [], currentIndex: -1, positionTicks: 0 })
+const showQueueWarnings = ref(false)
 const mpvValidation = ref<MpvValidationResult | null>(null)
 const searchInput = ref<HTMLInputElement | null>(null)
 const pageScroll = ref<HTMLElement | null>(null)
@@ -148,7 +150,12 @@ const playbackPhaseLabel = computed(() => {
 })
 const currentPlaybackLabel = computed(() => {
   const item = currentPlaybackItem.value
-  if (!item) return 'MPV'
+  if (!item) {
+    const queued = playbackSnapshot.value.queue[playbackSnapshot.value.currentIndex]
+    if (!queued) return 'MPV'
+    const episodeLabel = queued.episodeNumber === undefined ? queued.name : `第${queued.episodeNumber}集 · ${queued.name}`
+    return queued.seriesName ? `${queued.seriesName} · ${episodeLabel}` : episodeLabel
+  }
   return item.Type === 'Episode' && item.SeriesName
     ? `${item.SeriesName} · ${mediaPresentation(item).title}`
     : item.Name
@@ -673,6 +680,7 @@ async function stopPlayback(): Promise<void> {
 function handlePlaybackSnapshot(snapshot: PlaybackSnapshot): void {
   if (snapshot.revision < playbackSnapshot.value.revision) return
   playbackSnapshot.value = snapshot
+  if (!snapshot.queueWarnings?.length) showQueueWarnings.value = false
   currentPlaybackId.value = snapshot.phase === 'stopped' || snapshot.phase === 'idle' ? '' : (snapshot.currentItemId || '')
   currentPlaybackPosition.value = snapshot.positionTicks || 0
   if (snapshot.syncError && snapshot.syncError !== lastPlaybackSyncError.value) {
@@ -1074,6 +1082,13 @@ onUnmounted(() => {
       <button class="icon-button icon-button--small" type="button" :title="playbackSnapshot.phase === 'paused' ? '继续播放' : '暂停播放'" @click="togglePlaybackPause"><Play v-if="playbackSnapshot.phase === 'paused'" :size="16" fill="currentColor" /><Pause v-else :size="16" /></button>
       <button class="icon-button icon-button--small" type="button" title="下一集" :disabled="playbackSnapshot.currentIndex >= playbackSnapshot.queue.length - 1" @click="sendPlaybackCommand('next')"><SkipForward :size="16" /></button>
       <button class="icon-button icon-button--small" type="button" title="播完本集后停止" @click="sendPlaybackCommand('stop-after-current')"><Square :size="14" /></button>
+      <div v-if="playbackSnapshot.queueWarnings?.length" class="playback-warning-wrap">
+        <button class="icon-button icon-button--small playback-warning-button" type="button" title="查看跳过的剧集" :aria-expanded="showQueueWarnings" @click="showQueueWarnings = !showQueueWarnings"><AlertTriangle :size="15" /></button>
+        <div v-if="showQueueWarnings" class="playback-warning-popover" role="status">
+          <strong>部分剧集已跳过</strong>
+          <p v-for="warning in playbackSnapshot.queueWarnings" :key="warning.itemId">{{ warning.label }}：{{ warning.reason }}</p>
+        </div>
+      </div>
       <button v-if="playbackSnapshot.phase === 'error'" class="icon-button icon-button--small" type="button" title="重试播放" @click="retryPlayback"><RefreshCw :size="15" /></button>
       <button class="icon-button icon-button--small" type="button" title="停止播放并同步进度" @click="stopPlayback"><X :size="16" /></button>
     </div>

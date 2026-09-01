@@ -12,16 +12,3 @@ export function isResumePositionReached(actual: unknown, targetSeconds: number, 
     && Number.isFinite(targetSeconds)
     && Math.abs(actual - Math.max(0, targetSeconds)) <= Math.max(0.5, toleranceSeconds)
 }
-
-export function shouldAdvanceAfterEnd(input: {
-  reason: string
-  stopAfterCurrent: boolean
-  currentIndex: number
-  queueLength: number
-  transitioning: boolean
-}): boolean {
-  return input.reason === 'eof'
-    && !input.stopAfterCurrent
-    && !input.transitioning
-    && input.currentIndex + 1 < input.queueLength
-}

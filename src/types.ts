@@ -195,6 +195,12 @@ export interface PlaybackQueueItem {
   runtimeTicks?: number
 }
 
+export interface PlaybackQueueWarning {
+  itemId: string
+  label: string
+  reason: string
+}
+
 export interface PlaybackSnapshot {
   sessionId?: string
   revision: number
@@ -208,6 +214,7 @@ export interface PlaybackSnapshot {
   endReason?: string
   syncError?: string
   message?: string
+  queueWarnings?: PlaybackQueueWarning[]
 }
 
 export interface PlaybackEvent extends PlaybackSnapshot {

@@ -223,6 +223,11 @@ kbd { padding: 2px 5px; border: 1px solid #414249; border-radius: 4px; color: #7
 .playback-bar-copy small { color: #74767d; font-size: 10px; white-space: nowrap; }
 .playing-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 4px rgba(227,102,82,.16); }
 .playback-time { color: #777880; font-size: 10px; }
+.playback-warning-wrap { position: relative; }
+.playback-warning-button { color: #f3bf71; }
+.playback-warning-popover { position: absolute; right: 0; bottom: calc(100% + 12px); width: min(360px, 78vw); max-height: 240px; overflow: auto; padding: 13px 14px; border: 1px solid rgba(243,191,113,.32); border-radius: 7px; color: #d8d9dc; background: #1b1c21; box-shadow: 0 14px 34px rgba(0,0,0,.42); font-size: 11px; }
+.playback-warning-popover strong { display: block; margin-bottom: 8px; color: #f3bf71; font-size: 12px; }
+.playback-warning-popover p { margin: 6px 0 0; color: #a8a9af; line-height: 1.5; }
 .icon-button--small { width: 28px; height: 28px; }
 .toast { position: fixed; z-index: 40; right: 26px; bottom: 22px; display: flex; align-items: center; gap: 9px; max-width: 420px; padding: 12px 15px; border: 1px solid rgba(255,255,255,.12); border-radius: 7px; color: #e8e8e5; background: #1b1c21; box-shadow: 0 14px 34px rgba(0,0,0,.38); font-size: 12px; }
 .toast--success svg { color: #64d690; }

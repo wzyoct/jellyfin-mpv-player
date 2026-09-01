@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { isResumePositionReached, resolveResumeTicks, shouldAdvanceAfterEnd } from './playbackLogic'
+import { isResumePositionReached, resolveResumeTicks } from './playbackLogic'
 import type { EmbyItem } from '../src/types'
 
 function episode(userData?: EmbyItem['UserData']): EmbyItem {
@@ -19,12 +19,4 @@ describe('playback logic', () => {
     expect(isResumePositionReached(null, 600)).toBe(false)
   })
 
-  it('advances only on a natural end outside a transition', () => {
-    const input = { stopAfterCurrent: false, currentIndex: 0, queueLength: 2, transitioning: false }
-    expect(shouldAdvanceAfterEnd({ ...input, reason: 'eof' })).toBe(true)
-    expect(shouldAdvanceAfterEnd({ ...input, reason: 'quit' })).toBe(false)
-    expect(shouldAdvanceAfterEnd({ ...input, reason: 'eof', transitioning: true })).toBe(false)
-    expect(shouldAdvanceAfterEnd({ ...input, reason: 'eof', stopAfterCurrent: true })).toBe(false)
-    expect(shouldAdvanceAfterEnd({ ...input, reason: 'eof', currentIndex: 1 })).toBe(false)
-  })
 })
