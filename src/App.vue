@@ -83,6 +83,7 @@ const playbackInfo = ref<PlaybackInfo | null>(null)
 const seasonItems = ref<MediaItem[]>([])
 const episodeItems = ref<MediaItem[]>([])
 const selectedAudio = ref<number | undefined>()
+const audioWasManuallyModified = ref(false)
 const selectedSubtitle = ref<number | null>(null)
 const defaultSubtitle = ref<number | null>(null)
 const subtitleWasManuallyModified = ref(false)
@@ -598,6 +599,7 @@ async function loadPlayableDetails(item: MediaItem): Promise<void> {
     const streams = (playbackInfo.value.MediaSources?.[0]?.MediaStreams || item.MediaStreams || []) as MediaStream[]
     selectedAudio.value = streams.find((stream) => stream.Type === 'Audio' && stream.IsDefault)?.Index
       ?? streams.find((stream) => stream.Type === 'Audio')?.Index
+    audioWasManuallyModified.value = false
     defaultSubtitle.value = chooseDefaultSubtitle(streams) ?? null
     selectedSubtitle.value = defaultSubtitle.value
     subtitleWasManuallyModified.value = false
@@ -615,6 +617,7 @@ async function openDetails(item: MediaItem): Promise<void> {
   seasonItems.value = []
   episodeItems.value = []
   selectedAudio.value = undefined
+  audioWasManuallyModified.value = false
   selectedSubtitle.value = null
   defaultSubtitle.value = null
   subtitleWasManuallyModified.value = false
@@ -667,6 +670,10 @@ function handleSubtitleChange(): void {
   }
 }
 
+function handleAudioChange(): void {
+  audioWasManuallyModified.value = true
+}
+
 function resumePosition(item: MediaItem): number {
   const position = item.UserData?.PlaybackPositionTicks || 0
   if (item.UserData?.Played) return 0
@@ -680,10 +687,12 @@ async function playSelected(): Promise<void> {
     const snapshot = await window.jellyfin.playbackStart({
       itemId: item.Id,
       mediaSourceId: selectedSource.value?.Id,
-      audioPreference: (() => {
-        const stream = audioStreams.value.find((candidate) => candidate.Index === selectedAudio.value)
-        return { index: selectedAudio.value, language: stream?.Language || stream?.DisplayLanguage, title: stream?.Title || stream?.DisplayTitle, codec: stream?.Codec }
-      })(),
+      ...(audioWasManuallyModified.value ? {
+        audioPreference: (() => {
+          const stream = audioStreams.value.find((candidate) => candidate.Index === selectedAudio.value)
+          return { index: selectedAudio.value, language: stream?.Language || stream?.DisplayLanguage, title: stream?.Title || stream?.DisplayTitle, codec: stream?.Codec }
+        })(),
+      } : {}),
       ...(subtitleWasManuallyModified.value ? {
         subtitlePreference: selectedSubtitle.value === null
           ? { disabled: true }
@@ -1191,7 +1200,7 @@ onUnmounted(() => {
                 <div v-if="selectedItem.Type === 'Movie' || selectedItem.Type === 'Episode'" class="detail-actions">
                   <div v-if="isDetailLoading" class="loading-inline"><LoaderCircle class="spin" :size="18" />读取播放选项</div>
                   <template v-else>
-                    <label v-if="audioStreams.length" class="track-select"><Volume2 :size="16" /><select v-model="selectedAudio" aria-label="选择音轨"><option :value="undefined">默认音轨</option><option v-for="stream in audioStreams" :key="stream.Index" :value="stream.Index">{{ streamLabel(stream, 'audio') }}</option></select></label>
+                    <label v-if="audioStreams.length" class="track-select"><Volume2 :size="16" /><select v-model="selectedAudio" aria-label="选择音轨" @change="handleAudioChange"><option :value="undefined">默认音轨</option><option v-for="stream in audioStreams" :key="stream.Index" :value="stream.Index">{{ streamLabel(stream, 'audio') }}</option></select></label>
                     <label v-if="subtitleStreams.length" class="track-select"><Menu :size="16" /><select v-model="selectedSubtitle" aria-label="选择字幕" @change="handleSubtitleChange"><option :value="null">关闭字幕</option><option v-for="stream in subtitleStreams" :key="stream.Index" :value="stream.Index">{{ streamLabel(stream, 'subtitle') }}{{ stream.Index === selectedSubtitleStream?.Index ? '（当前）' : '' }}</option></select></label>
                     <span v-if="subtitleWasManuallyModified" class="track-status">字幕已手动修改</span>
                     <button class="button button--primary button--large" type="button" :disabled="isDetailLoading" @click="playSelected"><Play :size="18" fill="currentColor" />{{ resumePosition(selectedItem) ? '继续播放' : '播放' }}</button>

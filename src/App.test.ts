@@ -345,6 +345,21 @@ describe('App', () => {
     expect(vi.mocked(api.playbackStart).mock.calls.at(-1)?.[0]).toMatchObject({ subtitlePreference: { index: 1, isExternal: true } })
   })
 
+  it('does not send the automatically selected audio index as a strict preference', async () => {
+    const item = movie('audio-default-movie', '默认音轨电影')
+    const api = connectedHomeApi()
+    vi.mocked(api.getItem).mockResolvedValue(item)
+    vi.mocked(api.getPlaybackInfo).mockResolvedValue({ MediaSources: [{ Id: 'audio-source', MediaStreams: [{ Type: 'Audio', Index: 2, IsDefault: true, Language: 'zh-CN' }] }] })
+    vi.mocked(api.playbackStart).mockResolvedValue({ ...idleSnapshot(), revision: 1, phase: 'playing', sessionId: 'audio-session', currentItemId: item.Id, queue: [{ itemId: item.Id, name: item.Name, type: item.Type }], currentIndex: 0 })
+    const wrapper = mountApp(api)
+    await flushPromises()
+    await wrapper.get('.hero-actions button.button--ghost').trigger('click')
+    await flushPromises()
+    await wrapper.get('[role="dialog"] .detail-actions button.button--primary').trigger('click')
+    await flushPromises()
+    expect(vi.mocked(api.playbackStart).mock.calls.at(-1)?.[0]).not.toHaveProperty('audioPreference')
+  })
+
   it('starts playback from the hero and handles keyboard focus and page scrolling', async () => {
     const api = connectedHomeApi()
     const item = movie('hero-1', '英雄电影')
