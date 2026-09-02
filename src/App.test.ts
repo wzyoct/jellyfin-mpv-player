@@ -60,6 +60,7 @@ function createApi(overrides: Partial<Record<keyof JellyfinApi, unknown>> = {}):
     onFullScreenChanged: vi.fn(() => vi.fn()),
     validateMpvPath: vi.fn(async () => ({ valid: true, path: 'mpv.exe', message: 'MPV 路径和版本有效' })),
     testMpvPath: vi.fn(async () => ({ valid: true, path: 'mpv.exe', message: 'MPV 测试启动成功' })),
+    chooseSubtitleFile: vi.fn(async () => null),
     openLogDirectory: vi.fn(async () => undefined),
     playbackStart: vi.fn(async () => idleSnapshot()),
     playbackCommand: vi.fn(async () => idleSnapshot()),
@@ -358,6 +359,25 @@ describe('App', () => {
     await wrapper.get('[role="dialog"] .detail-actions button.button--primary').trigger('click')
     await flushPromises()
     expect(vi.mocked(api.playbackStart).mock.calls.at(-1)?.[0]).not.toHaveProperty('audioPreference')
+  })
+
+  it('sends a selected local subtitle path with playback', async () => {
+    const item = movie('local-subtitle-movie', '本地字幕电影')
+    const api = connectedHomeApi()
+    vi.mocked(api.getItem).mockResolvedValue(item)
+    vi.mocked(api.getPlaybackInfo).mockResolvedValue({ MediaSources: [{ Id: 'local-subtitle-source', MediaStreams: [] }] })
+    vi.mocked(api.chooseSubtitleFile).mockResolvedValue('C:\\Subtitles\\custom.ass')
+    vi.mocked(api.playbackStart).mockResolvedValue({ ...idleSnapshot(), revision: 1, phase: 'playing', sessionId: 'local-subtitle-session', currentItemId: item.Id, queue: [{ itemId: item.Id, name: item.Name, type: item.Type }], currentIndex: 0 })
+    const wrapper = mountApp(api)
+    await flushPromises()
+    await wrapper.get('.hero-actions button.button--ghost').trigger('click')
+    await flushPromises()
+    await wrapper.get('[role="dialog"] button.button--secondary').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('custom.ass')
+    await wrapper.get('[role="dialog"] .detail-actions button.button--primary').trigger('click')
+    await flushPromises()
+    expect(vi.mocked(api.playbackStart).mock.calls.at(-1)?.[0]).toMatchObject({ localSubtitlePath: 'C:\\Subtitles\\custom.ass' })
   })
 
   it('starts playback from the hero and handles keyboard focus and page scrolling', async () => {

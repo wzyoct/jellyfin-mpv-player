@@ -276,6 +276,8 @@ kbd { padding: 2px 5px; border: 1px solid #414249; border-radius: 4px; color: #7
 .detail-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 32px; }
 .track-select { display: inline-flex; align-items: center; gap: 7px; height: 46px; padding: 0 10px; border: 1px solid rgba(255,255,255,.12); border-radius: 7px; color: #909197; background: #1a1b20; }
 .track-select select { max-width: 260px; height: 30px; padding: 0 4px; border: 0; outline: 0; color: #e3e4e6; background: transparent; font-size: 12px; }
+.local-subtitle { display: inline-flex; align-items: center; gap: 7px; max-width: min(360px, 100%); height: 46px; padding: 0 6px 0 10px; border: 1px solid rgba(255,255,255,.12); border-radius: 7px; color: #d9e0e5; background: #1a1b20; }
+.local-subtitle > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .loading-inline { display: inline-flex; align-items: center; gap: 8px; color: #8b8c93; font-size: 12px; }
 .home-empty-state { min-height: 280px; gap: 10px; }
 .home-empty-state .button { margin-top: 8px; }

@@ -87,6 +87,7 @@ const audioWasManuallyModified = ref(false)
 const selectedSubtitle = ref<number | null>(null)
 const defaultSubtitle = ref<number | null>(null)
 const subtitleWasManuallyModified = ref(false)
+const localSubtitlePath = ref<string | null>(null)
 const isLoading = ref(false)
 const homeLoading = ref(false)
 const libraryLoading = ref(false)
@@ -601,8 +602,8 @@ async function loadPlayableDetails(item: MediaItem): Promise<void> {
       ?? streams.find((stream) => stream.Type === 'Audio')?.Index
     audioWasManuallyModified.value = false
     defaultSubtitle.value = chooseDefaultSubtitle(streams) ?? null
-    selectedSubtitle.value = defaultSubtitle.value
-    subtitleWasManuallyModified.value = false
+  selectedSubtitle.value = defaultSubtitle.value
+  subtitleWasManuallyModified.value = false
   } catch (error) {
     showNotice(error instanceof Error ? error.message : '读取播放信息失败', 'error')
   } finally {
@@ -621,6 +622,7 @@ async function openDetails(item: MediaItem): Promise<void> {
   selectedSubtitle.value = null
   defaultSubtitle.value = null
   subtitleWasManuallyModified.value = false
+  localSubtitlePath.value = null
   isDetailLoading.value = true
   try {
     const detailed = await window.jellyfin.getItem(item.Id)
@@ -674,6 +676,17 @@ function handleAudioChange(): void {
   audioWasManuallyModified.value = true
 }
 
+async function chooseLocalSubtitle(): Promise<void> {
+  try {
+    const path = await window.jellyfin.chooseSubtitleFile()
+    if (!path) return
+    localSubtitlePath.value = path
+    showNotice(`已选择外挂字幕：${path.split(/[\\/]/).pop() || path}`)
+  } catch (error) {
+    showNotice(error instanceof Error ? error.message : '选择外挂字幕失败', 'error')
+  }
+}
+
 function resumePosition(item: MediaItem): number {
   const position = item.UserData?.PlaybackPositionTicks || 0
   if (item.UserData?.Played) return 0
@@ -701,6 +714,7 @@ async function playSelected(): Promise<void> {
             return { index: selectedSubtitle.value, isExternal: stream ? isExternalSubtitle(stream) : undefined, language: stream?.Language || stream?.DisplayLanguage, title: stream?.Title || stream?.DisplayTitle, codec: stream?.Codec }
           })(),
       } : {}),
+      ...(localSubtitlePath.value ? { localSubtitlePath: localSubtitlePath.value } : {}),
     })
     handlePlaybackSnapshot(snapshot)
     closeDetails()
@@ -1203,6 +1217,8 @@ onUnmounted(() => {
                     <label v-if="audioStreams.length" class="track-select"><Volume2 :size="16" /><select v-model="selectedAudio" aria-label="选择音轨" @change="handleAudioChange"><option :value="undefined">默认音轨</option><option v-for="stream in audioStreams" :key="stream.Index" :value="stream.Index">{{ streamLabel(stream, 'audio') }}</option></select></label>
                     <label v-if="subtitleStreams.length" class="track-select"><Menu :size="16" /><select v-model="selectedSubtitle" aria-label="选择字幕" @change="handleSubtitleChange"><option :value="null">关闭字幕</option><option v-for="stream in subtitleStreams" :key="stream.Index" :value="stream.Index">{{ streamLabel(stream, 'subtitle') }}{{ stream.Index === selectedSubtitleStream?.Index ? '（当前）' : '' }}</option></select></label>
                     <span v-if="subtitleWasManuallyModified" class="track-status">字幕已手动修改</span>
+                    <span v-if="localSubtitlePath" class="local-subtitle" :title="localSubtitlePath"><FolderOpen :size="16" /><span>{{ localSubtitlePath.split(/[\\/]/).pop() }}</span><button class="icon-button icon-button--small" type="button" title="移除本地字幕" aria-label="移除本地字幕" @click="localSubtitlePath = null"><X :size="14" /></button></span>
+                    <button class="button button--secondary" type="button" title="选择本地外挂字幕" @click="chooseLocalSubtitle"><FolderOpen :size="16" />选择外挂字幕</button>
                     <button class="button button--primary button--large" type="button" :disabled="isDetailLoading" @click="playSelected"><Play :size="18" fill="currentColor" />{{ resumePosition(selectedItem) ? '继续播放' : '播放' }}</button>
                   </template>
                 </div>

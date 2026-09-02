@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   failPropertyCommands: new Set<string>(),
   failSendCommands: new Set<string>(),
   mainWindow: null as any,
+  dialog: { showOpenDialog: vi.fn() },
   logger: {
     initialize: vi.fn(),
     info: vi.fn(),
@@ -134,6 +135,7 @@ vi.mock('electron', () => {
       on: vi.fn((channel: string, handler: Handler) => mocks.events.set(channel, handler)),
     },
     Menu: { setApplicationMenu: vi.fn() },
+    dialog: mocks.dialog,
     safeStorage: {
       isEncryptionAvailable: vi.fn(() => false),
       encryptString: vi.fn(),
@@ -206,6 +208,7 @@ describe('Electron main process IPC orchestration', () => {
     mocks.writeFileSyncMock.mockReset()
     mocks.spawnMock.mockReset()
     mocks.spawnSyncMock.mockReset()
+    mocks.dialog.showOpenDialog.mockReset()
     mocks.waitSequences.length = 0
     mocks.failPropertyCommands.clear()
     mocks.failSendCommands.clear()
@@ -354,6 +357,15 @@ describe('Electron main process IPC orchestration', () => {
     expect(mocks.fetchMock.mock.calls.some(([url]) => url.includes('/Sessions/Playing/Stopped'))).toBe(true)
   })
 
+  it('opens the subtitle file picker and returns the selected path', async () => {
+    mocks.dialog.showOpenDialog.mockResolvedValueOnce({ canceled: false, filePaths: ['C:\\Subtitles\\custom.ass'] })
+    await expect(handler('subtitle:choose-file')()).resolves.toBe('C:\\Subtitles\\custom.ass')
+    expect(mocks.dialog.showOpenDialog).toHaveBeenCalledWith(expect.objectContaining({
+      properties: ['openFile'],
+      filters: [{ name: '字幕文件', extensions: ['ass', 'ssa', 'srt', 'vtt', 'smi', 'sub'] }],
+    }))
+  })
+
   it('loads an external subtitle through the local gateway and selects it in MPV', async () => {
     const movie = { Id: 'movie-external-subtitle', Name: '外挂字幕测试', Type: 'Movie', MediaStreams: [] }
     mocks.fetchMock.mockImplementation(async (url: string) => {
@@ -376,6 +388,26 @@ describe('Electron main process IPC orchestration', () => {
     expect(ipc?.send.mock.calls).toEqual(expect.arrayContaining([
       [['sub-add', expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/play\//), 'select']],
     ]))
+    await handler('playback:command')({}, { sessionId: snapshot.sessionId, command: 'stop' })
+  })
+
+  it('mounts a manually selected local subtitle after the video loads', async () => {
+    const movie = { Id: 'movie-local-subtitle', Name: '本地字幕测试', Type: 'Movie', MediaStreams: [] }
+    mocks.fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes('/Items/movie-local-subtitle/PlaybackInfo')) return jsonResponse({
+        MediaSources: [{ Id: 'local-source', SupportsDirectPlay: true, MediaStreams: [
+          { Type: 'Subtitle', Index: 0, Language: 'zh-CN', DeliveryMethod: 'External', DeliveryUrl: '/broken-subtitle.srt' },
+        ] }],
+      })
+      if (url.includes('/Users/user-1/Items/movie-local-subtitle')) return jsonResponse(movie)
+      return new Response(null, { status: 204 })
+    })
+
+    const snapshot = await handler('playback:start')({}, { itemId: movie.Id, localSubtitlePath: 'C:\\Subtitles\\custom.ass' })
+    const ipc = mocks.mpvInstances.at(-1)
+    expect(snapshot.phase).toBe('playing')
+    expect(ipc?.send.mock.calls).toContainEqual([['sub-add', 'C:\\Subtitles\\custom.ass', 'select']])
+    expect(ipc?.send.mock.calls.some(([command]) => command[0] === 'sub-add' && command[1] !== 'C:\\Subtitles\\custom.ass')).toBe(false)
     await handler('playback:command')({}, { sessionId: snapshot.sessionId, command: 'stop' })
   })
 

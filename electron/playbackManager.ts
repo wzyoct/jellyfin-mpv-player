@@ -90,6 +90,7 @@ interface PlaybackSession {
   endReason?: string
   audioPreference?: AudioPreference
   subtitlePreference?: SubtitlePreference
+  localSubtitlePath?: string
   mediaSourceId?: string
   selectedItemId: string
   abortController: AbortController
@@ -494,7 +495,11 @@ async function activateLoadedEntry(session: PlaybackSession, entry: PlaybackEntr
   entry.loaded = true
   if (entry.initialResumeTicks > 0) await seekEntry(session, entry, entry.initialResumeTicks)
   let subtitleWarning: string | undefined
-  if (entry.subtitleRoute) {
+  const localSubtitlePath = entry.itemId === session.selectedItemId ? session.localSubtitlePath : undefined
+  if (localSubtitlePath) {
+    await session.ipc.send(['sub-add', localSubtitlePath, 'select'])
+    logger.info('playback', 'local-subtitle-added', { sessionId: session.sessionId, itemId: entry.itemId })
+  } else if (entry.subtitleRoute) {
     const route = entry.subtitleRoute
     if (route.deliveryMethod.toLowerCase() === 'external' || route.isExternal) {
       if (!route.deliveryUrl) {
@@ -855,6 +860,7 @@ async function startPlaybackInternal(request: StartPlaybackRequest): Promise<Pla
     startupPending: true,
     audioPreference: request.audioPreference,
     subtitlePreference: request.subtitlePreference,
+    localSubtitlePath: request.localSubtitlePath,
     selectedItemId: request.itemId,
     abortController: new AbortController(),
     gateway: new PlaybackGateway(client),

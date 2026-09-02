@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu, safeStorage, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, safeStorage, shell } from 'electron'
 import { spawn, spawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
@@ -320,6 +320,14 @@ function registerIpc(): void {
   ipcMain.handle('mpv:test', (_event, mpvPath?: string) => {
     const result = testMpvPath(mpvPath)
     return result
+  })
+  ipcMain.handle('subtitle:choose-file', async () => {
+    const result = await dialog.showOpenDialog({
+      title: '选择外挂字幕',
+      properties: ['openFile'],
+      filters: [{ name: '字幕文件', extensions: ['ass', 'ssa', 'srt', 'vtt', 'smi', 'sub'] }],
+    })
+    return result.canceled ? null : result.filePaths[0] || null
   })
   ipcMain.handle('playback:start', async (_event, request: StartPlaybackRequest) => {
     try {

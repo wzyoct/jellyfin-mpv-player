@@ -200,6 +200,7 @@ export interface StartPlaybackRequest {
   mediaSourceId?: string
   audioPreference?: AudioPreference
   subtitlePreference?: SubtitlePreference
+  localSubtitlePath?: string
 }
 
 export interface PlaybackCommand {
@@ -304,6 +305,7 @@ export interface JellyfinApi {
   onSettingsChanged(callback: (settings: PublicSettings) => void): () => void
   validateMpvPath(path?: string): Promise<MpvValidationResult>
   testMpvPath(path?: string): Promise<MpvValidationResult>
+  chooseSubtitleFile(): Promise<string | null>
   openLogDirectory(): Promise<void>
   playbackStart(request: StartPlaybackRequest): Promise<PlaybackSnapshot>
   playbackCommand(request: PlaybackCommand): Promise<PlaybackSnapshot>

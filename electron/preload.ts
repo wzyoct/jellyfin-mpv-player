@@ -44,6 +44,7 @@ const api: JellyfinApi = {
   },
   validateMpvPath: (path?: string) => invoke('mpv:validate', path),
   testMpvPath: (path?: string) => invoke('mpv:test', path),
+  chooseSubtitleFile: () => invoke('subtitle:choose-file'),
   openLogDirectory: () => invoke('diagnostics:open-log-directory'),
   playbackStart: (request: StartPlaybackRequest) => invoke('playback:start', request),
   playbackCommand: (request: PlaybackCommand) => invoke('playback:command', request),
