@@ -127,6 +127,7 @@ function currentServerLabel(): string {
 }
 
 const LOCAL_SUBTITLE_EXTENSIONS = new Set(['.ass', '.ssa', '.srt', '.vtt', '.smi', '.sub'])
+const EXTERNAL_SUBTITLE_TITLE = 'Stream'
 
 function findSidecarSubtitle(sourcePath?: string): string | undefined {
   if (!sourcePath || extname(sourcePath).toLowerCase() !== '.strm') return undefined
@@ -240,8 +241,9 @@ async function prepareEntry(session: PlaybackSession, item: MediaItem, startTime
     || sources.find((candidate) => candidate.SupportsDirectStream)
     || sources[0]
   const streams = (source.MediaStreams || item.MediaStreams || []) as MediaStream[]
+  const localSubtitlePath = !session.subtitlePreference ? findSidecarSubtitle(source.Path) : undefined
   const audioStreamIndex = chooseAudio(streams, session.audioPreference, isSelected)
-  const subtitleStreamIndex = chooseSubtitle(streams, session.subtitlePreference, isSelected)
+  const subtitleStreamIndex = localSubtitlePath ? undefined : chooseSubtitle(streams, session.subtitlePreference, isSelected)
   if (isSelected && session.audioPreference?.index !== undefined && audioStreamIndex === undefined) {
     throw new Error(`《${item.Name}》未找到用户指定的音轨 ${session.audioPreference.index}`)
   }
@@ -249,7 +251,6 @@ async function prepareEntry(session: PlaybackSession, item: MediaItem, startTime
     throw new Error(`《${item.Name}》未找到用户指定的字幕轨道 ${session.subtitlePreference.index}`)
   }
   const subtitle = subtitleStreamIndex === undefined ? undefined : streams.find((stream) => stream.Type === 'Subtitle' && stream.Index === subtitleStreamIndex)
-  const localSubtitlePath = isSelected ? findSidecarSubtitle(source.Path) : undefined
   const route = client.buildPlaybackRoute(item.Id, source, {
     audioStreamIndex,
     subtitleStreamIndex,
@@ -534,7 +535,7 @@ async function activateLoadedEntryInternal(session: PlaybackSession, entry: Play
   const localSubtitlePath = entry.localSubtitlePath
   if (localSubtitlePath) {
     try {
-      await session.ipc.send(['sub-add', localSubtitlePath, 'select'])
+      await session.ipc.send(['sub-add', localSubtitlePath, 'select', EXTERNAL_SUBTITLE_TITLE])
       logger.info('playback', 'local-subtitle-added', { sessionId: session.sessionId, itemId: entry.itemId })
     } catch (error) {
       subtitleWarning = `《${entry.name}》同目录外挂字幕加载失败，已继续无字幕播放`
@@ -553,7 +554,7 @@ async function activateLoadedEntryInternal(session: PlaybackSession, entry: Play
             upstreamUrl: getClient().buildSubtitleUrl(entry.itemId, entry.source, { Index: route.streamIndex, Codec: route.codec }, entry.playbackInfo.PlaySessionId),
             requiredHeaders: { Authorization: getClient().buildAuthorization() },
           })
-          await session.ipc.send(['sub-add', subtitleUrl, 'select'])
+          await session.ipc.send(['sub-add', subtitleUrl, 'select', EXTERNAL_SUBTITLE_TITLE])
         }
       } catch (error) {
         if (session.subtitlePreference?.index !== undefined) throw new Error(`《${entry.name}》外挂字幕加载失败：${error instanceof Error ? error.message : String(error)}`)

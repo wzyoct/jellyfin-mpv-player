@@ -385,7 +385,7 @@ describe('Electron main process IPC orchestration', () => {
     const ipc = mocks.mpvInstances.at(-1)
     expect(snapshot.phase).toBe('playing')
     expect(ipc?.send.mock.calls).toEqual(expect.arrayContaining([
-      [['sub-add', expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/play\//), 'select']],
+      [['sub-add', expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/play\//), 'select', 'Stream']],
     ]))
     ipc?.emit({ event: 'file-loaded', playlist_entry_id: 1 })
     await flush()
@@ -411,8 +411,34 @@ describe('Electron main process IPC orchestration', () => {
     const snapshot = await handler('playback:start')({}, { itemId: movie.Id })
     const ipc = mocks.mpvInstances.at(-1)
     expect(snapshot.phase).toBe('playing')
-    expect(ipc?.send.mock.calls).toContainEqual([['sub-add', 'C:\\Media\\字幕\\movie.ass', 'select']])
+    expect(ipc?.send.mock.calls).toContainEqual([['sub-add', 'C:\\Media\\字幕\\movie.ass', 'select', 'Stream']])
     expect(ipc?.send.mock.calls.some(([command]) => command[0] === 'sub-add' && command[1] !== 'C:\\Media\\字幕\\movie.ass')).toBe(false)
+    await handler('playback:command')({}, { sessionId: snapshot.sessionId, command: 'stop' })
+  })
+
+  it('does not override an explicit embedded subtitle with a local sidecar', async () => {
+    const movie = { Id: 'movie-strm-explicit-subtitle', Name: 'STRM 手动字幕测试', Type: 'Movie', MediaStreams: [] }
+    mocks.readdirSyncMock.mockReturnValueOnce(['movie.ass'])
+    const { existsSync } = await import('node:fs')
+    vi.mocked(existsSync).mockReturnValueOnce(true)
+    mocks.fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes('/Items/movie-strm-explicit-subtitle/PlaybackInfo')) return jsonResponse({
+        MediaSources: [{ Id: 'strm-explicit-source', Path: 'C:\\Media\\字幕\\movie.strm', SupportsDirectPlay: true, MediaStreams: [
+          { Type: 'Subtitle', Index: 2, Language: 'zh-CN', DeliveryMethod: 'Embed' },
+        ] }],
+      })
+      if (url.includes('/Users/user-1/Items/movie-strm-explicit-subtitle')) return jsonResponse(movie)
+      return new Response(null, { status: 204 })
+    })
+
+    const snapshot = await handler('playback:start')({}, {
+      itemId: movie.Id,
+      subtitlePreference: { index: 2, isExternal: false, language: 'zh-CN' },
+    })
+    const ipc = mocks.mpvInstances.at(-1)
+    expect(snapshot.phase).toBe('playing')
+    expect(ipc?.send.mock.calls.some(([command]) => command[0] === 'sub-add')).toBe(false)
+    expect(ipc?.setProperty).toHaveBeenCalledWith('sid', 2)
     await handler('playback:command')({}, { sessionId: snapshot.sessionId, command: 'stop' })
   })
 
