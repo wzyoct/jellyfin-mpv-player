@@ -10,7 +10,7 @@
 
 播放器通过 MediaWarp 发送 POST PlaybackInfo，并使用 MPV DeviceProfile。电视剧会将完整逻辑目录立即写入 MPV M3U，仅按当前集解析 PlaybackInfo，播放成功后单次预热下一集；未预热条目在被选中时按需解析。媒体源的 `DirectStreamUrl`、`TranscodingUrl`、`DeliveryUrl` 和 `DeliveryMethod` 是唯一播放路由来源，禁止读取 `.strm` 文本猜测网盘地址。
 
-首页继续观看专用调用 `/Users/{userId}/Items/Resume`，固定携带 `Limit=100`、`Recursive=true`、`MediaTypes=Video`、用户数据和卡片/图片字段。客户端保留服务端顺序，并按完全相同的 Item ID 稳定去重；初次加载错误进入首页错误状态，播放后刷新错误保留原列表并显示刷新失败通知。该流程不再调用 `Items?Filters=IsResumable`。
+首页继续观看专用调用 `/Users/{userId}/Items/Resume`，固定携带 `Limit=100`、`Recursive=true`、`MediaTypes=Video`、用户数据和卡片/图片字段。客户端按 `UserData.LastPlayedDate` 稳定降序排列；Episode 按 `SeriesId` 聚合并保留最近播放单集，电影及缺少 `SeriesId` 的项目按自身 ID 去重，时间缺失、无效或相同时保留服务端原始相对顺序。播放后只在服务端确认同步且项目已返回时提升对应媒体或剧集；刷新错误保留原列表并显示刷新失败通知。该流程不再调用 `Items?Filters=IsResumable`。
 
 每个播放会话启动一个绑定 `127.0.0.1` 的临时网关。每个逻辑条目只有一个本地能力 URL，资源解析器单飞并缓存成功结果；网关向服务端请求时附加 Jellyfin 鉴权，遇到无需专用请求头的 MediaWarp 302 时把重定向交给 MPV，跨域请求不携带 Jellyfin Token。网关同时处理外置字幕、Range、If-Range 和需要专用请求头的资源，最多跟随 10 次重定向；MPV 主动取消不会记为 502。
 

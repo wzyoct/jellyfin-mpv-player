@@ -26,7 +26,7 @@ Jellyfin MPV Player 是一个非官方的 Windows x64 Jellyfin 桌面客户端�
 
 ## 兼容性与轨道规则
 
-继续观看使用 Jellyfin 的 `/Users/{userId}/Items/Resume` 端点，要求服务端或 MediaWarp 插件支持该标准接口；播放器不再调用旧的 `IsResumable` 过滤器。服务端返回顺序就是首页展示顺序，播放器只按完全相同的媒体 ID 稳定去重。
+继续观看使用 Jellyfin 的 `/Users/{userId}/Items/Resume` 端点，要求服务端或 MediaWarp 插件支持该标准接口；播放器不再调用旧的 `IsResumable` 过滤器。播放器按 `UserData.LastPlayedDate` 稳定降序排列；同一剧集按 `SeriesId` 聚合并保留最近播放单集，电影及缺少 `SeriesId` 的项目按自身 ID 去重。时间缺失、无效或相同时保留服务端原始相对顺序。
 
 字幕默认优先级为：外挂简中、外挂其他中文、服务端默认外挂、第一条外挂；只有没有外挂时才按内嵌简中、内嵌其他中文、服务端默认内嵌选择。`DeliveryMethod=Encode` 表示已烧录进画面的字幕，不作为可选轨道，也不会映射到 MPV。外挂字幕按 `DeliveryUrl → 本地鉴权网关 → MPV` 加载。
 
