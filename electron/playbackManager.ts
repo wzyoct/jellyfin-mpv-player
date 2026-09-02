@@ -6,7 +6,7 @@ import { MpvIpc, type MpvIpcMessage } from './mpvIpc'
 import { logger } from './logger'
 import { buildEpisodeQueue } from '../src/playbackQueue'
 import { buildHexPlaylistUrl } from './playbackPlaylist'
-import { chooseDefaultSubtitle } from '../src/subtitlePreference'
+import { chooseDefaultSubtitle, isExternalSubtitle, isSelectableSubtitle } from '../src/subtitlePreference'
 import { isResumePositionReached, resolveResumeTicks } from './playbackLogic'
 import { formatPlaybackLoadError } from './playbackError'
 import type {
@@ -162,16 +162,22 @@ function chooseAudio(streams: MediaStream[], preference?: AudioPreference, stric
 
 function chooseSubtitle(streams: MediaStream[], preference?: SubtitlePreference, strictIndex = false): number | undefined {
   if (preference?.disabled) return undefined
+  const subtitles = streams.filter(isSelectableSubtitle)
   if (preference?.index !== undefined && strictIndex) {
-    return streams.some((stream) => stream.Type === 'Subtitle' && stream.Index === preference.index) ? preference.index : undefined
+    const selected = subtitles.find((stream) => stream.Index === preference.index)
+    if (!selected || (preference.isExternal !== undefined && isExternalSubtitle(selected) !== preference.isExternal)) return undefined
+    return preference.index
   }
   const language = preference?.language?.toLowerCase()
   const title = preference?.title?.toLowerCase()
   const codec = preference?.codec?.toLowerCase()
-  return streams.find((stream) => stream.Type === 'Subtitle' && language && (stream.Language || stream.DisplayLanguage || '').toLowerCase() === language && (!codec || (stream.Codec || '').toLowerCase() === codec))?.Index
-    ?? streams.find((stream) => stream.Type === 'Subtitle' && title && (stream.Title || stream.DisplayTitle || '').toLowerCase().includes(title) && (!codec || (stream.Codec || '').toLowerCase() === codec))?.Index
-    ?? streams.find((stream) => stream.Type === 'Subtitle' && language && (stream.Language || stream.DisplayLanguage || '').toLowerCase() === language)?.Index
-    ?? streams.find((stream) => stream.Type === 'Subtitle' && title && (stream.Title || stream.DisplayTitle || '').toLowerCase().includes(title))?.Index
+  const candidates = preference?.isExternal === undefined
+    ? subtitles
+    : subtitles.filter((stream) => isExternalSubtitle(stream) === preference.isExternal)
+  return candidates.find((stream) => language && (stream.Language || stream.DisplayLanguage || '').toLowerCase() === language && (!codec || (stream.Codec || '').toLowerCase() === codec))?.Index
+    ?? candidates.find((stream) => title && (stream.Title || stream.DisplayTitle || '').toLowerCase().includes(title) && (!codec || (stream.Codec || '').toLowerCase() === codec))?.Index
+    ?? candidates.find((stream) => language && (stream.Language || stream.DisplayLanguage || '').toLowerCase() === language)?.Index
+    ?? candidates.find((stream) => title && (stream.Title || stream.DisplayTitle || '').toLowerCase().includes(title))?.Index
     ?? chooseDefaultSubtitle(streams)
 }
 
@@ -234,11 +240,11 @@ async function prepareEntry(session: PlaybackSession, item: MediaItem, startTime
     playlistEntryIds: [],
     playlistIndexes: [],
     subtitleRoute: subtitle && subtitleStreamIndex !== undefined ? {
-      deliveryMethod: subtitle.DeliveryMethod || (subtitle.IsExternal ? 'External' : 'Embed'),
+      deliveryMethod: subtitle.DeliveryMethod || (isExternalSubtitle(subtitle) ? 'External' : 'Embed'),
       deliveryUrl: subtitle.DeliveryUrl,
       codec: subtitle.Codec,
       streamIndex: subtitleStreamIndex,
-      isExternal: Boolean(subtitle.IsExternal || subtitle.IsExternalUrl),
+      isExternal: isExternalSubtitle(subtitle),
     } : undefined,
   }
 }
@@ -491,8 +497,12 @@ async function activateLoadedEntry(session: PlaybackSession, entry: PlaybackEntr
     const route = entry.subtitleRoute
     if (route.deliveryMethod.toLowerCase() === 'external' || route.isExternal) {
       if (!route.deliveryUrl) throw new Error(`《${entry.name}》的外挂字幕没有可用的 DeliveryUrl`)
-      const subtitleUrl = session.gateway.register({ upstreamUrl: getClient().resolveUrl(route.deliveryUrl) })
-      await session.ipc.send(['sub-add', subtitleUrl, 'select'])
+      try {
+        const subtitleUrl = session.gateway.register({ upstreamUrl: getClient().resolveUrl(route.deliveryUrl) })
+        await session.ipc.send(['sub-add', subtitleUrl, 'select'])
+      } catch (error) {
+        throw new Error(`《${entry.name}》外挂字幕加载失败：${error instanceof Error ? error.message : String(error)}`)
+      }
     } else {
       const tracks = await session.ipc.getProperty('track-list')
       const track = Array.isArray(tracks)

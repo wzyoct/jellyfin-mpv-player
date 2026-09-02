@@ -48,6 +48,7 @@ function createApi(overrides: Partial<Record<keyof JellyfinApi, unknown>> = {}):
     logout: vi.fn(async () => settings(false)),
     getViews: vi.fn(async () => []),
     getItems: vi.fn(async () => ({ Items: [], TotalRecordCount: 0 })),
+    getResumeItems: vi.fn(async () => ({ Items: [], TotalRecordCount: 0 })),
     getMovieRecommendations: vi.fn(async () => []),
     getItem: vi.fn(async (item: MediaItem) => item),
     getPlaybackInfo: vi.fn(async () => ({ MediaSources: [] })),
@@ -109,12 +110,12 @@ function connectedHomeApi(): JellyfinApi {
     getMovieRecommendations: vi.fn(async () => [{ Items: [recommended, recommended] }]),
     getNextUp: vi.fn(async () => ({ Items: [next], TotalRecordCount: 1 })),
     getItems: vi.fn(async (query: any = {}) => {
-      if (query.filters === 'IsResumable') return { Items: [continued], TotalRecordCount: 1 }
       if (query.sortBy === 'DateCreated') return { Items: [latest], TotalRecordCount: 1 }
       if (query.sortBy === 'SortName') return { Items: all, TotalRecordCount: all.length }
       if (query.searchTerm) return { Items: [movie('search-1', query.searchTerm)], TotalRecordCount: 1 }
       return { Items: [], TotalRecordCount: 0 }
     }),
+    getResumeItems: vi.fn(async () => ({ Items: [continued], TotalRecordCount: 1 })),
   })
 }
 
@@ -172,7 +173,16 @@ describe('App', () => {
     expect(wrapper.text()).toContain('2 项内容')
     expect(wrapper.text()).toContain('推荐电影 简介')
     expect(wrapper.text()).not.toContain('打开详情，查看完整介绍与播放选项。')
-    expect(vi.mocked(api.getItems).mock.calls.some(([query]) => query?.filters === 'IsResumable')).toBe(true)
+    expect(api.getResumeItems).toHaveBeenCalled()
+  })
+
+  it('keeps the resume list error visible when the dedicated request fails', async () => {
+    const api = connectedHomeApi()
+    vi.mocked(api.getResumeItems).mockRejectedValueOnce(new Error('Resume endpoint unavailable'))
+    const wrapper = mountApp(api)
+    await flushPromises()
+    expect(wrapper.text()).toContain('Resume endpoint unavailable')
+    expect(wrapper.text()).not.toContain('继续观看')
   })
 
   it('hides the hero description when overview metadata is unavailable', async () => {
@@ -256,7 +266,6 @@ describe('App', () => {
     vi.mocked(api.getItems).mockImplementation(async (query: any = {}) => {
       if (query.searchTerm === 'first') return new Promise((resolve) => { resolveFirst = resolve })
       if (query.searchTerm === 'second') return new Promise((resolve) => { resolveSecond = resolve })
-      if (query.filters === 'IsResumable') return { Items: [], TotalRecordCount: 0 }
       if (query.sortBy === 'DateCreated' || query.sortBy === 'SortName') return { Items: [], TotalRecordCount: 0 }
       return { Items: [], TotalRecordCount: 0 }
     })
@@ -298,6 +307,42 @@ describe('App', () => {
     await flushPromises()
     expect(api.playbackStart).toHaveBeenCalledWith(expect.objectContaining({ itemId: 'movie-1' }))
     expect(wrapper.text()).toContain('正在用 MPV 播放')
+  })
+
+  it('shows the default subtitle without sending a preference until the user changes it', async () => {
+    const item = movie('subtitle-movie', '字幕电影')
+    const api = connectedHomeApi()
+    vi.mocked(api.getItems).mockImplementation(async (query: any = {}) => {
+      if (query.sortBy === 'DateCreated' || query.sortBy === 'SortName') return { Items: [item], TotalRecordCount: 1 }
+      return { Items: [], TotalRecordCount: 0 }
+    })
+    vi.mocked(api.getMovieRecommendations).mockResolvedValue([])
+    vi.mocked(api.getItem).mockResolvedValue(item)
+    vi.mocked(api.getPlaybackInfo).mockResolvedValue({ MediaSources: [{ Id: 'subtitle-source', MediaStreams: [
+      { Type: 'Subtitle', Index: 1, Language: 'en', DeliveryMethod: 'External', DeliveryUrl: '/sub-en.srt' },
+      { Type: 'Subtitle', Index: 2, Language: 'zh-CN', DeliveryMethod: 'External', DeliveryUrl: '/sub-zh.srt' },
+      { Type: 'Subtitle', Index: 3, Language: 'zh-CN', DeliveryMethod: 'Encode' },
+    ] }] })
+    vi.mocked(api.playbackStart).mockResolvedValue({ ...idleSnapshot(), revision: 1, phase: 'playing', sessionId: 'subtitle-session', currentItemId: item.Id, queue: [{ itemId: item.Id, name: item.Name, type: item.Type }], currentIndex: 0 })
+    const wrapper = mountApp(api)
+    await flushPromises()
+    await wrapper.get('.hero-actions button.button--ghost').trigger('click')
+    await flushPromises()
+
+    const select = wrapper.get('[role="dialog"] select[aria-label="选择字幕"]')
+    expect(select.findAll('option')).toHaveLength(3)
+    expect(wrapper.text()).not.toContain('3')
+    await wrapper.get('[role="dialog"] .detail-actions button.button--primary').trigger('click')
+    await flushPromises()
+    expect(vi.mocked(api.playbackStart).mock.calls.at(-1)?.[0]).not.toHaveProperty('subtitlePreference')
+
+    await wrapper.get('.hero-actions button.button--ghost').trigger('click')
+    await flushPromises()
+    await wrapper.get('[role="dialog"] select[aria-label="选择字幕"]').setValue('1')
+    expect(wrapper.text()).toContain('字幕已手动修改')
+    await wrapper.get('[role="dialog"] .detail-actions button.button--primary').trigger('click')
+    await flushPromises()
+    expect(vi.mocked(api.playbackStart).mock.calls.at(-1)?.[0]).toMatchObject({ subtitlePreference: { index: 1, isExternal: true } })
   })
 
   it('starts playback from the hero and handles keyboard focus and page scrolling', async () => {

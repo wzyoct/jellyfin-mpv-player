@@ -40,21 +40,24 @@ export function isSimplifiedChineseSubtitle(stream: MediaStream): boolean {
 }
 
 export function isExternalSubtitle(stream: MediaStream): boolean {
-  return Boolean(stream.IsExternal || stream.IsExternalUrl)
+  return Boolean(stream.IsExternal || stream.IsExternalUrl || normalized(stream.DeliveryMethod) === 'external')
+}
+
+export function isSelectableSubtitle(stream: MediaStream): boolean {
+  return stream.Type === 'Subtitle' && normalized(stream.DeliveryMethod) !== 'encode' && typeof stream.Index === 'number'
 }
 
 export function chooseDefaultSubtitle(streams: MediaStream[]): number | undefined {
-  const subtitles = streams.filter((stream) => stream.Type === 'Subtitle' && typeof stream.Index === 'number')
+  const subtitles = streams.filter(isSelectableSubtitle)
   if (!subtitles.length) return undefined
 
-  const byLanguage = (predicate: (stream: MediaStream) => boolean): MediaStream[] => [
-    ...subtitles.filter((stream) => isExternalSubtitle(stream) && predicate(stream)),
-    ...subtitles.filter((stream) => !isExternalSubtitle(stream) && predicate(stream)),
-  ]
+  const external = subtitles.filter(isExternalSubtitle)
+  const candidates = external.length ? external : subtitles
   const preferred = [
-    ...byLanguage(isSimplifiedChineseSubtitle),
-    ...byLanguage((stream) => isChineseSubtitle(stream) && !isSimplifiedChineseSubtitle(stream)),
-    ...subtitles.filter((stream) => stream.IsDefault),
+    ...candidates.filter(isSimplifiedChineseSubtitle),
+    ...candidates.filter((stream) => isChineseSubtitle(stream) && !isSimplifiedChineseSubtitle(stream)),
+    ...candidates.filter((stream) => stream.IsDefault),
+    ...(external.length ? candidates : []),
   ][0]
   return preferred?.Index
 }

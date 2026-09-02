@@ -36,7 +36,7 @@ import MediaRail from './components/MediaRail.vue'
 import packageInfo from '../package.json'
 import releaseNotesData from './data/release-notes.json'
 import { contextualItemLabel, itemTypeLabel, mediaPresentation } from './mediaPresentation'
-import { chooseDefaultSubtitle, isExternalSubtitle, isChineseSubtitle } from './subtitlePreference'
+import { chooseDefaultSubtitle, isExternalSubtitle, isChineseSubtitle, isSelectableSubtitle } from './subtitlePreference'
 import type {
   MediaItem,
   MediaView,
@@ -83,6 +83,8 @@ const seasonItems = ref<MediaItem[]>([])
 const episodeItems = ref<MediaItem[]>([])
 const selectedAudio = ref<number | undefined>()
 const selectedSubtitle = ref<number | null>(null)
+const defaultSubtitle = ref<number | null>(null)
+const subtitleWasManuallyModified = ref(false)
 const isLoading = ref(false)
 const homeLoading = ref(false)
 const libraryLoading = ref(false)
@@ -146,7 +148,7 @@ const mediaStreams = computed<MediaStream[]>(() => {
   return (sourceStreams?.length ? sourceStreams : selectedItem.value?.MediaStreams || []) as MediaStream[]
 })
 const audioStreams = computed(() => mediaStreams.value.filter((stream) => stream.Type === 'Audio'))
-const subtitleStreams = computed(() => mediaStreams.value.filter((stream) => stream.Type === 'Subtitle'))
+const subtitleStreams = computed(() => mediaStreams.value.filter(isSelectableSubtitle))
 const selectedSubtitleStream = computed(() => subtitleStreams.value.find((stream) => stream.Index === selectedSubtitle.value))
 const currentPlaybackItem = computed(() => {
   const all = [...libraryItems.value, ...latestItems.value, ...continueItems.value, ...nextUpItems.value, ...homeAllItems.value, ...searchResults.value]
@@ -238,7 +240,12 @@ async function loadAllItems(options: ItemsQuery): Promise<MediaItem[]> {
 }
 
 function uniqueItems(items: MediaItem[]): MediaItem[] {
-  return [...new Map(items.map((item) => [item.Id, item])).values()]
+  const seen = new Set<string>()
+  return items.filter((item) => {
+    if (seen.has(item.Id)) return false
+    seen.add(item.Id)
+    return true
+  })
 }
 
 function stopHeroAutoPlay(): void {
@@ -329,13 +336,7 @@ async function loadHome(): Promise<void> {
         sortOrder: 'Descending',
         limit: 24,
       }),
-      loadAllItems({
-        recursive: true,
-        includeItemTypes: 'Movie,Episode',
-        filters: 'IsResumable',
-        sortBy: 'DatePlayed',
-        sortOrder: 'Descending',
-      }),
+      window.jellyfin.getResumeItems(),
       window.jellyfin.getNextUp().catch(() => ({ Items: [], TotalRecordCount: 0 })),
       loadAllItems({
         recursive: true,
@@ -349,7 +350,7 @@ async function loadHome(): Promise<void> {
     recommendationItems.value = uniqueItems(recommendations.flatMap((category) => category.Items || []))
       .filter((item) => item.Type === 'Movie')
       .slice(0, 8)
-    continueItems.value = uniqueItems(continued)
+    continueItems.value = uniqueItems(continued.Items)
     nextUpItems.value = uniqueItems(nextUp.Items || []).slice(0, 24)
     homeAllItems.value = uniqueItems(allItems)
     homeMovieItems.value = homeAllItems.value.filter((item) => item.Type === 'Movie')
@@ -369,14 +370,8 @@ async function loadHome(): Promise<void> {
 async function refreshContinueItems(): Promise<void> {
   if (!isConnected.value) return
   try {
-    const continued = await loadAllItems({
-      recursive: true,
-      includeItemTypes: 'Movie,Episode',
-      filters: 'IsResumable',
-      sortBy: 'DatePlayed',
-      sortOrder: 'Descending',
-    })
-    continueItems.value = uniqueItems(continued)
+    const continued = await window.jellyfin.getResumeItems()
+    continueItems.value = uniqueItems(continued.Items)
     const nextUp = await window.jellyfin.getNextUp().catch(() => ({ Items: [], TotalRecordCount: 0 }))
     nextUpItems.value = uniqueItems(nextUp.Items || []).slice(0, 24)
   } catch (error) {
@@ -598,7 +593,9 @@ async function loadPlayableDetails(item: MediaItem): Promise<void> {
     const streams = (playbackInfo.value.MediaSources?.[0]?.MediaStreams || item.MediaStreams || []) as MediaStream[]
     selectedAudio.value = streams.find((stream) => stream.Type === 'Audio' && stream.IsDefault)?.Index
       ?? streams.find((stream) => stream.Type === 'Audio')?.Index
-    selectedSubtitle.value = chooseDefaultSubtitle(streams) ?? null
+    defaultSubtitle.value = chooseDefaultSubtitle(streams) ?? null
+    selectedSubtitle.value = defaultSubtitle.value
+    subtitleWasManuallyModified.value = false
   } catch (error) {
     showNotice(error instanceof Error ? error.message : '读取播放信息失败', 'error')
   } finally {
@@ -614,6 +611,8 @@ async function openDetails(item: MediaItem): Promise<void> {
   episodeItems.value = []
   selectedAudio.value = undefined
   selectedSubtitle.value = null
+  defaultSubtitle.value = null
+  subtitleWasManuallyModified.value = false
   isDetailLoading.value = true
   try {
     const detailed = await window.jellyfin.getItem(item.Id)
@@ -657,6 +656,12 @@ function closeDetails(): void {
   episodeItems.value = []
 }
 
+function handleSubtitleChange(): void {
+  if (selectedSubtitle.value === null || selectedSubtitle.value !== defaultSubtitle.value) {
+    subtitleWasManuallyModified.value = true
+  }
+}
+
 function resumePosition(item: MediaItem): number {
   const position = item.UserData?.PlaybackPositionTicks || 0
   if (item.UserData?.Played) return 0
@@ -674,12 +679,14 @@ async function playSelected(): Promise<void> {
         const stream = audioStreams.value.find((candidate) => candidate.Index === selectedAudio.value)
         return { index: selectedAudio.value, language: stream?.Language || stream?.DisplayLanguage, title: stream?.Title || stream?.DisplayTitle, codec: stream?.Codec }
       })(),
-      subtitlePreference: selectedSubtitle.value === null
-        ? { disabled: true }
-        : (() => {
-          const stream = selectedSubtitleStream.value
-          return { index: selectedSubtitle.value, language: stream?.Language || stream?.DisplayLanguage, title: stream?.Title || stream?.DisplayTitle, codec: stream?.Codec }
-        })(),
+      ...(subtitleWasManuallyModified.value ? {
+        subtitlePreference: selectedSubtitle.value === null
+          ? { disabled: true }
+          : (() => {
+            const stream = selectedSubtitleStream.value
+            return { index: selectedSubtitle.value, isExternal: stream ? isExternalSubtitle(stream) : undefined, language: stream?.Language || stream?.DisplayLanguage, title: stream?.Title || stream?.DisplayTitle, codec: stream?.Codec }
+          })(),
+      } : {}),
     })
     handlePlaybackSnapshot(snapshot)
     closeDetails()
@@ -1173,7 +1180,8 @@ onUnmounted(() => {
                   <div v-if="isDetailLoading" class="loading-inline"><LoaderCircle class="spin" :size="18" />读取播放选项</div>
                   <template v-else>
                     <label v-if="audioStreams.length" class="track-select"><Volume2 :size="16" /><select v-model="selectedAudio" aria-label="选择音轨"><option :value="undefined">默认音轨</option><option v-for="stream in audioStreams" :key="stream.Index" :value="stream.Index">{{ streamLabel(stream, 'audio') }}</option></select></label>
-                    <label v-if="subtitleStreams.length" class="track-select"><Menu :size="16" /><select v-model="selectedSubtitle" aria-label="选择字幕"><option :value="null">关闭字幕</option><option v-for="stream in subtitleStreams" :key="stream.Index" :value="stream.Index">{{ streamLabel(stream, 'subtitle') }}{{ stream.Index === selectedSubtitleStream?.Index ? '（当前）' : '' }}</option></select></label>
+                    <label v-if="subtitleStreams.length" class="track-select"><Menu :size="16" /><select v-model="selectedSubtitle" aria-label="选择字幕" @change="handleSubtitleChange"><option :value="null">关闭字幕</option><option v-for="stream in subtitleStreams" :key="stream.Index" :value="stream.Index">{{ streamLabel(stream, 'subtitle') }}{{ stream.Index === selectedSubtitleStream?.Index ? '（当前）' : '' }}</option></select></label>
+                    <span v-if="subtitleWasManuallyModified" class="track-status">字幕已手动修改</span>
                     <button class="button button--primary button--large" type="button" :disabled="isDetailLoading" @click="playSelected"><Play :size="18" fill="currentColor" />{{ resumePosition(selectedItem) ? '继续播放' : '播放' }}</button>
                   </template>
                 </div>

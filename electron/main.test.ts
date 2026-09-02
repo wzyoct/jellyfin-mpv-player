@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   writeFileSyncMock: vi.fn(),
   waitSequences: [] as MpvIpcMessage[][],
   failPropertyCommands: new Set<string>(),
+  failSendCommands: new Set<string>(),
   mainWindow: null as any,
   logger: {
     initialize: vi.fn(),
@@ -42,6 +43,7 @@ class FakeMpvIpc {
   ])
   eventHandler?: (message: MpvIpcMessage) => void
   readonly send = vi.fn(async (command: unknown[]) => {
+    if (typeof command[0] === 'string' && mocks.failSendCommands.has(command[0])) throw new Error(`send ${command[0]} failed`)
     if (command[0] !== 'loadlist' || typeof command[1] !== 'string' || !command[1].startsWith('hex://')) return
     const playlistText = Buffer.from(command[1].slice('hex://'.length), 'hex').toString('utf8')
     const count = playlistText.split(/\r?\n/).filter((line) => line.startsWith('#EXTINF:')).length
@@ -206,6 +208,7 @@ describe('Electron main process IPC orchestration', () => {
     mocks.spawnSyncMock.mockReset()
     mocks.waitSequences.length = 0
     mocks.failPropertyCommands.clear()
+    mocks.failSendCommands.clear()
     mocks.mpvInstances.length = 0
     mocks.spawnSyncMock.mockReturnValue({ status: 0, stdout: 'mpv 0.41.0', stderr: '' })
     mocks.spawnMock.mockImplementation(() => makeChild())
@@ -351,6 +354,31 @@ describe('Electron main process IPC orchestration', () => {
     expect(mocks.fetchMock.mock.calls.some(([url]) => url.includes('/Sessions/Playing/Stopped'))).toBe(true)
   })
 
+  it('loads an external subtitle through the local gateway and selects it in MPV', async () => {
+    const movie = { Id: 'movie-external-subtitle', Name: '外挂字幕测试', Type: 'Movie', MediaStreams: [] }
+    mocks.fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes('/Items/movie-external-subtitle/PlaybackInfo')) {
+        return jsonResponse({
+          MediaSources: [{
+            Id: 'external-source',
+            SupportsDirectPlay: true,
+            MediaStreams: [{ Type: 'Subtitle', Index: 7, Language: 'zh-CN', DeliveryMethod: 'External', DeliveryUrl: '/Videos/movie-external-subtitle/Subtitles/7/Stream' }],
+          }],
+        })
+      }
+      if (url.includes('/Users/user-1/Items/movie-external-subtitle')) return jsonResponse(movie)
+      return new Response(null, { status: 204 })
+    })
+
+    const snapshot = await handler('playback:start')({}, { itemId: movie.Id, subtitlePreference: { index: 7, isExternal: true, language: 'zh-CN' } })
+    const ipc = mocks.mpvInstances.at(-1)
+    expect(snapshot.phase).toBe('playing')
+    expect(ipc?.send.mock.calls).toEqual(expect.arrayContaining([
+      [['sub-add', expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/play\//), 'select']],
+    ]))
+    await handler('playback:command')({}, { sessionId: snapshot.sessionId, command: 'stop' })
+  })
+
   it('returns control failures without changing a healthy playback phase', async () => {
     const movie = { Id: 'movie-command-error', Name: '控制错误测试', Type: 'Movie', MediaStreams: [] }
     mocks.fetchMock.mockImplementation(async (url: string) => {
@@ -472,7 +500,7 @@ describe('Electron main process IPC orchestration', () => {
   it('keeps the complete episode queue while resolving each episode with its own source and tracks', async () => {
     const episodes = [
       { Id: 'scoped-1', Name: '作用域第一集', Type: 'Episode', SeriesId: 'scoped-series', ParentIndexNumber: 1, IndexNumber: 1, MediaStreams: [{ Type: 'Audio', Index: 11, Language: 'ja' }, { Type: 'Subtitle', Index: 12, Language: 'chi' }] },
-      { Id: 'scoped-2', Name: '作用域第二集', Type: 'Episode', SeriesId: 'scoped-series', ParentIndexNumber: 1, IndexNumber: 2, MediaStreams: [{ Type: 'Audio', Index: 21, Language: 'ja' }, { Type: 'Subtitle', Index: 22, Language: 'chi' }] },
+      { Id: 'scoped-2', Name: '作用域第二集', Type: 'Episode', SeriesId: 'scoped-series', ParentIndexNumber: 1, IndexNumber: 2, MediaStreams: [{ Type: 'Audio', Index: 21, Language: 'ja' }, { Type: 'Subtitle', Index: 22, Language: 'chi', DeliveryMethod: 'External', DeliveryUrl: '/subtitles/scoped-2.ass' }] },
     ]
     mocks.fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
       if (url.includes('/Shows/scoped-series/Episodes')) return jsonResponse({ Items: episodes, TotalRecordCount: episodes.length })
@@ -488,7 +516,7 @@ describe('Electron main process IPC orchestration', () => {
       itemId: 'scoped-2',
       mediaSourceId: 'source-scoped-2',
       audioPreference: { index: 21, language: 'ja', title: '日语', codec: 'aac' },
-      subtitlePreference: { index: 22, language: 'chi', title: '中文字幕', codec: 'ass' },
+      subtitlePreference: { index: 22, isExternal: true, language: 'chi', title: '中文字幕', codec: 'ass' },
     })
     expect(snapshot.queue.map((item) => item.itemId)).toEqual(['scoped-1', 'scoped-2'])
     const playbackCallsBeforeNext = mocks.fetchMock.mock.calls.filter(([url]) => url.includes('/PlaybackInfo'))
@@ -508,6 +536,7 @@ describe('Electron main process IPC orchestration', () => {
     expect(nextBody).not.toHaveProperty('MediaSourceId')
     expect(nextBody).not.toHaveProperty('AudioStreamIndex')
     expect(nextBody).not.toHaveProperty('SubtitleStreamIndex')
+    expect(ipc?.setProperty).toHaveBeenCalledWith('sid', 4)
     expect((await handler('playback:snapshot')()).queue).toHaveLength(2)
     await handler('playback:command')({}, { sessionId: snapshot.sessionId, command: 'stop' })
   })
@@ -608,6 +637,25 @@ describe('Electron main process IPC orchestration', () => {
       itemId: movie.Id,
       subtitlePreference: { index: 8 },
     })).rejects.toThrow('未找到用户指定的字幕轨道 8')
+  })
+
+  it('surfaces named errors for missing and failed external subtitle loading', async () => {
+    const movie = { Id: 'movie-external-subtitle-error', Name: '外挂字幕错误', Type: 'Movie', MediaStreams: [] }
+    const playbackInfo = (deliveryUrl?: string) => ({ MediaSources: [{ Id: 'external-error-source', SupportsDirectPlay: true, MediaStreams: [{ Type: 'Subtitle', Index: 7, Language: 'zh-CN', DeliveryMethod: 'External', ...(deliveryUrl ? { DeliveryUrl: deliveryUrl } : {}) }] }] })
+    mocks.fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes('/Items/movie-external-subtitle-error/PlaybackInfo')) return jsonResponse(playbackInfo(undefined))
+      if (url.includes('/Users/user-1/Items/movie-external-subtitle-error')) return jsonResponse(movie)
+      return new Response(null, { status: 204 })
+    })
+    await expect(handler('playback:start')({}, { itemId: movie.Id, subtitlePreference: { index: 7, isExternal: true } })).rejects.toThrow('《外挂字幕错误》的外挂字幕没有可用的 DeliveryUrl')
+
+    mocks.fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes('/Items/movie-external-subtitle-error/PlaybackInfo')) return jsonResponse(playbackInfo('/subtitles/error.ass'))
+      if (url.includes('/Users/user-1/Items/movie-external-subtitle-error')) return jsonResponse(movie)
+      return new Response(null, { status: 204 })
+    })
+    mocks.failSendCommands.add('sub-add')
+    await expect(handler('playback:start')({}, { itemId: movie.Id, subtitlePreference: { index: 7, isExternal: true } })).rejects.toThrow('《外挂字幕错误》外挂字幕加载失败：send sub-add failed')
   })
 
   it('returns the last snapshot for stale commands and surfaces MPV validation errors', async () => {

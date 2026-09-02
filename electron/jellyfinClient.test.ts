@@ -68,6 +68,31 @@ describe('Jellyfin client contract', () => {
     expect((init.headers as Headers).get('X-Emby-Authorization')).toBeNull()
   })
 
+  it('loads resume items through the dedicated endpoint with fixed media and image parameters', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ Items: [{ Id: 'resume-1' }], TotalRecordCount: 1 }))
+    const client = new JellyfinClient('https://media.example.test', 'token', 'user-1', identity)
+    await expect(client.getResumeItems()).resolves.toMatchObject({ Items: [{ Id: 'resume-1' }], TotalRecordCount: 1 })
+    const [url, init] = fetchMock.mock.calls[0]
+    const parsed = new URL(url)
+    expect(parsed.pathname).toBe('/Users/user-1/Items/Resume')
+    expect(Object.fromEntries(parsed.searchParams)).toMatchObject({
+      UserId: 'user-1',
+      Limit: '100',
+      Recursive: 'true',
+      MediaTypes: 'Video',
+      EnableUserData: 'true',
+      EnableImages: 'true',
+      EnableImageTypes: 'Primary,Backdrop,Thumb',
+    })
+    expect((init.headers as Headers).get('Authorization')).toContain('Token="token"')
+  })
+
+  it('strictly validates the resume response shape', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ Items: [] }))
+    const client = new JellyfinClient('https://media.example.test', 'token', 'user-1', identity)
+    await expect(client.getResumeItems()).rejects.toThrow('缺少 Items 或 TotalRecordCount')
+  })
+
   it('posts PlaybackInfo with MPV profile and selected tracks', async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ MediaSources: [{ Id: 'source-1' }] }))
     const client = new JellyfinClient('https://media.example.test', 'token', 'user-1', identity)
