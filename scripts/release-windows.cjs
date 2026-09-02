@@ -121,6 +121,9 @@ try {
   run(builderCommand, ['--win', '--dir', `--config.directories.output=${builderOutput}`])
   copyRuntime(stagingDirectory, archiveDirectory)
   writeGuides(archiveDirectory)
+  // Keep the convenient root launcher in sync while leaving release/data untouched.
+  copyRuntime(stagingDirectory, releaseRoot)
+  writeGuides(releaseRoot)
   createZip(archiveDirectory, archivePath)
   writeZipChecksum(archivePath, checksumPath)
   console.log(`Windows 便携发布 ZIP 已生成：${archivePath}`)
