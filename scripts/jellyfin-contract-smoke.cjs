@@ -30,7 +30,7 @@ async function run() {
   assert.match(lastInit.headers.get('Authorization'), /Token="token"/)
 
   responseBody = { Items: [{ Id: 'resume-1' }], TotalRecordCount: 1 }
-  assert.deepEqual(await client.getResumeItems(), responseBody)
+  assert.deepEqual(await client.getResumeItems(), { ...responseBody, StartIndex: undefined })
   assert.match(lastUrl, /\/Users\/user\/Items\/Resume\?/)
   const resumeUrl = new URL(lastUrl)
   assert.equal(resumeUrl.searchParams.get('Limit'), '100')
