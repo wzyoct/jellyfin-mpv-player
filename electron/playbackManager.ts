@@ -524,7 +524,7 @@ async function activateLoadedEntry(session: PlaybackSession, entry: PlaybackEntr
       await session.ipc.setProperty('sid', track.id)
     }
   }
-  if (entry.audioStreamIndex !== undefined) {
+  if (entry.audioStreamIndex !== undefined && session.audioPreference?.index !== undefined) {
     const tracks = await session.ipc.getProperty('track-list')
     const track = Array.isArray(tracks)
       ? (tracks as Array<{ type?: unknown; id?: unknown; 'ff-index'?: unknown }>).find((candidate) => candidate.type === 'audio' && candidate['ff-index'] === entry.audioStreamIndex)
