@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   spawnSyncMock: vi.fn(),
   fetchMock: vi.fn(),
   writeFileSyncMock: vi.fn(),
+  readdirSyncMock: vi.fn(() => [] as string[]),
   waitSequences: [] as MpvIpcMessage[][],
   failPropertyCommands: new Set<string>(),
   failSendCommands: new Set<string>(),
@@ -152,6 +153,7 @@ vi.mock('node:child_process', () => ({
 
 vi.mock('node:fs', () => ({
   existsSync: vi.fn(() => false),
+  readdirSync: mocks.readdirSyncMock,
   mkdirSync: mocks.writeFileSyncMock,
   readFileSync: vi.fn(),
   writeFileSync: mocks.writeFileSyncMock,
@@ -206,6 +208,8 @@ describe('Electron main process IPC orchestration', () => {
   beforeEach(() => {
     mocks.fetchMock.mockReset()
     mocks.writeFileSyncMock.mockReset()
+    mocks.readdirSyncMock.mockReset()
+    mocks.readdirSyncMock.mockReturnValue([])
     mocks.spawnMock.mockReset()
     mocks.spawnSyncMock.mockReset()
     mocks.dialog.showOpenDialog.mockReset()
@@ -408,6 +412,29 @@ describe('Electron main process IPC orchestration', () => {
     expect(snapshot.phase).toBe('playing')
     expect(ipc?.send.mock.calls).toContainEqual([['sub-add', 'C:\\Subtitles\\custom.ass', 'select']])
     expect(ipc?.send.mock.calls.some(([command]) => command[0] === 'sub-add' && command[1] !== 'C:\\Subtitles\\custom.ass')).toBe(false)
+    await handler('playback:command')({}, { sessionId: snapshot.sessionId, command: 'stop' })
+  })
+
+  it('mounts the only subtitle beside a STRM file when the server path is locally accessible', async () => {
+    const movie = { Id: 'movie-strm-sidecar', Name: 'STRM 同目录字幕测试', Type: 'Movie', MediaStreams: [] }
+    mocks.readdirSyncMock.mockReturnValueOnce(['movie.ass'])
+    const { existsSync } = await import('node:fs')
+    vi.mocked(existsSync).mockReturnValueOnce(true)
+    mocks.fetchMock.mockImplementation(async (url: string) => {
+      if (url.includes('/Items/movie-strm-sidecar/PlaybackInfo')) return jsonResponse({
+        MediaSources: [{ Id: 'strm-sidecar-source', Path: 'C:\\Media\\字幕\\movie.strm', SupportsDirectPlay: true, MediaStreams: [
+          { Type: 'Subtitle', Index: 0, DeliveryMethod: 'External', DeliveryUrl: '/broken-subtitle.srt' },
+        ] }],
+      })
+      if (url.includes('/Users/user-1/Items/movie-strm-sidecar')) return jsonResponse(movie)
+      return new Response(null, { status: 204 })
+    })
+
+    const snapshot = await handler('playback:start')({}, { itemId: movie.Id })
+    const ipc = mocks.mpvInstances.at(-1)
+    expect(snapshot.phase).toBe('playing')
+    expect(ipc?.send.mock.calls).toContainEqual([['sub-add', 'C:\\Media\\字幕\\movie.ass', 'select']])
+    expect(ipc?.send.mock.calls.some(([command]) => command[0] === 'sub-add' && command[1] !== 'C:\\Media\\字幕\\movie.ass')).toBe(false)
     await handler('playback:command')({}, { sessionId: snapshot.sessionId, command: 'stop' })
   })
 
@@ -686,6 +713,7 @@ describe('Electron main process IPC orchestration', () => {
     const snapshot = await handler('playback:start')({}, { itemId: movie.Id })
     expect(snapshot).toMatchObject({ phase: 'playing', message: expect.stringContaining('无字幕播放') })
     expect(mocks.spawnMock.mock.results.at(-1)?.value.kill).not.toHaveBeenCalled()
+    expect(mocks.mpvInstances.at(-1)?.setProperty).toHaveBeenCalledWith('sid', 'no')
     expect(mocks.fetchMock.mock.calls.some(([url, options]) => url.includes('/Sessions/Playing/Progress') && JSON.stringify(options).includes('SubtitleStreamIndex'))).toBe(false)
   })
 

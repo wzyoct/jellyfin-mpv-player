@@ -1,5 +1,7 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { existsSync, readdirSync } from 'node:fs'
+import { dirname, extname, join, parse } from 'node:path'
 import { JellyfinClient, isAbortError, type MediaSourceInfo, type PlaybackInfo } from './jellyfinClient'
 import { PlaybackGateway } from './playbackGateway'
 import { MpvIpc, type MpvIpcMessage } from './mpvIpc'
@@ -57,6 +59,7 @@ interface PlaybackEntry extends PlaybackQueueItem {
   activePlaylistIndex?: number
   loaded: boolean
   subtitleRoute?: SubtitleRoute
+  localSubtitlePath?: string
   preparing?: Promise<PlaybackEntry>
   preparationError?: string
 }
@@ -121,6 +124,26 @@ function optionalClient(): JellyfinClient | null {
 
 function currentServerLabel(): string {
   return 'Jellyfin'
+}
+
+const LOCAL_SUBTITLE_EXTENSIONS = new Set(['.ass', '.ssa', '.srt', '.vtt', '.smi', '.sub'])
+
+function findSidecarSubtitle(sourcePath?: string): string | undefined {
+  if (!sourcePath || extname(sourcePath).toLowerCase() !== '.strm') return undefined
+  const directory = dirname(sourcePath)
+  const sourceStem = parse(sourcePath).name
+  let names: string[]
+  try {
+    names = readdirSync(directory)
+  } catch {
+    return undefined
+  }
+  const candidates = names
+    .filter((name) => LOCAL_SUBTITLE_EXTENSIONS.has(extname(name).toLowerCase()))
+    .map((name) => join(directory, name))
+    .filter((candidate) => existsSync(candidate))
+  const exactMatch = candidates.find((candidate) => parse(candidate).name === sourceStem)
+  return exactMatch || (candidates.length === 1 ? candidates[0] : undefined)
 }
 
 
@@ -226,6 +249,7 @@ async function prepareEntry(session: PlaybackSession, item: MediaItem, startTime
     throw new Error(`《${item.Name}》未找到用户指定的字幕轨道 ${session.subtitlePreference.index}`)
   }
   const subtitle = subtitleStreamIndex === undefined ? undefined : streams.find((stream) => stream.Type === 'Subtitle' && stream.Index === subtitleStreamIndex)
+  const localSubtitlePath = isSelected ? session.localSubtitlePath || findSidecarSubtitle(source.Path) : undefined
   const route = client.buildPlaybackRoute(item.Id, source, {
     audioStreamIndex,
     subtitleStreamIndex,
@@ -247,6 +271,7 @@ async function prepareEntry(session: PlaybackSession, item: MediaItem, startTime
       streamIndex: subtitleStreamIndex,
       isExternal: isExternalSubtitle(subtitle),
     } : undefined,
+    localSubtitlePath,
   }
 }
 
@@ -495,10 +520,16 @@ async function activateLoadedEntry(session: PlaybackSession, entry: PlaybackEntr
   entry.loaded = true
   if (entry.initialResumeTicks > 0) await seekEntry(session, entry, entry.initialResumeTicks)
   let subtitleWarning: string | undefined
-  const localSubtitlePath = entry.itemId === session.selectedItemId ? session.localSubtitlePath : undefined
+  const localSubtitlePath = entry.localSubtitlePath
   if (localSubtitlePath) {
-    await session.ipc.send(['sub-add', localSubtitlePath, 'select'])
-    logger.info('playback', 'local-subtitle-added', { sessionId: session.sessionId, itemId: entry.itemId })
+    try {
+      await session.ipc.send(['sub-add', localSubtitlePath, 'select'])
+      logger.info('playback', 'local-subtitle-added', { sessionId: session.sessionId, itemId: entry.itemId })
+    } catch (error) {
+      if (session.localSubtitlePath) throw new Error(`《${entry.name}》本地外挂字幕加载失败：${error instanceof Error ? error.message : String(error)}`)
+      subtitleWarning = `《${entry.name}》同目录外挂字幕加载失败，已继续无字幕播放`
+      logger.warn('playback', 'optional-local-subtitle-failed', { sessionId: session.sessionId, itemId: entry.itemId, reason: error })
+    }
   } else if (entry.subtitleRoute) {
     const route = entry.subtitleRoute
     if (route.deliveryMethod.toLowerCase() === 'external' || route.isExternal) {
@@ -517,6 +548,11 @@ async function activateLoadedEntry(session: PlaybackSession, entry: PlaybackEntr
         logger.warn('playback', 'optional-subtitle-failed', { sessionId: session.sessionId, itemId: entry.itemId, streamIndex: route.streamIndex, reason: error })
       }
       if (subtitleWarning) {
+        try {
+          await session.ipc.setProperty('sid', 'no')
+        } catch (error) {
+          logger.warn('playback', 'subtitle-disable-failed', { sessionId: session.sessionId, itemId: entry.itemId, reason: error })
+        }
         entry.subtitleStreamIndex = undefined
         entry.subtitleRoute = undefined
       }

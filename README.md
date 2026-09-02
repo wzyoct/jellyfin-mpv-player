@@ -28,7 +28,7 @@ Jellyfin MPV Player 是一个非官方的 Windows x64 Jellyfin 桌面客户端�
 
 继续观看使用 Jellyfin 的 `/Users/{userId}/Items/Resume` 端点，要求服务端或 MediaWarp 插件支持该标准接口；播放器不再调用旧的 `IsResumable` 过滤器。播放器按 `UserData.LastPlayedDate` 稳定降序排列；同一剧集按 `SeriesId` 聚合并保留最近播放单集，电影及缺少 `SeriesId` 的项目按自身 ID 去重。时间缺失、无效或相同时保留服务端原始相对顺序。
 
-字幕默认优先级为：外挂简中、外挂其他中文、服务端默认外挂、第一条外挂；只有没有外挂时才按内嵌简中、内嵌其他中文、服务端默认内嵌选择。`DeliveryMethod=Encode` 表示已烧录进画面的字幕，不作为可选轨道，也不会映射到 MPV。服务器外挂字幕按 `DeliveryUrl → 本地鉴权网关 → MPV` 加载；播放前也可以在详情页选择本地 ASS、SSA、SRT、VTT、SMI 或 SUB 文件，用户选择的本地字幕会覆盖该媒体的服务器自动字幕。
+字幕默认优先级为：外挂简中、外挂其他中文、服务端默认外挂、第一条外挂；只有没有外挂时才按内嵌简中、内嵌其他中文、服务端默认内嵌选择。`DeliveryMethod=Encode` 表示已烧录进画面的字幕，不作为可选轨道，也不会映射到 MPV。服务器外挂字幕按 `DeliveryUrl → 本地鉴权网关 → MPV` 加载；STRM 播放会优先尝试挂载 Windows 可访问目录中的同名字幕文件，目录只有一份字幕时也会自动挂载。播放前还可以在详情页选择本地 ASS、SSA、SRT、VTT、SMI 或 SUB 文件，用户选择的本地字幕会覆盖自动字幕。
 
 遇到继续观看刷新或字幕加载问题，先在设置中打开日志目录，查看 `data/logs/` 中对应时间的 JSONL 日志，同时核对 MPV、MediaWarp 和 Jellyfin 版本；不要把令牌、设置或日志提交到仓库。
 
