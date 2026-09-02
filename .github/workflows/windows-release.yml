@@ -89,8 +89,9 @@ jobs:
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
           $asset = $release.assets | Where-Object { $_.name -eq "Jellyfin-MPV-Player-v$version-win-x64.zip" } | Select-Object -First 1
           if (-not $asset) { throw "Draft ZIP asset was not found" }
-          gh api -H 'Accept: application/octet-stream' "repos/$env:GITHUB_REPOSITORY/releases/assets/$($asset.id)" --output (Join-Path $clean $asset.name)
-          Expand-Archive -LiteralPath (Join-Path $clean $asset.name) -DestinationPath (Join-Path $clean 'expanded')
+          $assetPath = Join-Path $clean $asset.name
+          Invoke-WebRequest -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/assets/$($asset.id)" -Headers @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/octet-stream'; 'X-GitHub-Api-Version' = '2022-11-28' } -OutFile $assetPath
+          Expand-Archive -LiteralPath $assetPath -DestinationPath (Join-Path $clean 'expanded')
           $entries = Get-ChildItem -LiteralPath (Join-Path $clean 'expanded') -Recurse -Force
           if (-not (Test-Path (Join-Path $clean 'expanded/Jellyfin MPV Player.exe'))) { throw 'Portable executable is missing' }
           $forbidden = $entries | Where-Object { $_.FullName -match '\\(data|历史版本|构建内部文件|settings\.json|logs)(\\|$)' }
