@@ -63,9 +63,19 @@ jobs:
         run: |
           $tag = $env:GITHUB_REF_NAME
           $package = Get-Content package.json -Raw | ConvertFrom-Json
+          $note = (Get-Content src/data/release-notes.json -Raw | ConvertFrom-Json)[0]
+          $notesFile = Join-Path $env:RUNNER_TEMP 'jellyfin-mpv-player-release-notes.md'
+          $lines = @("# Jellyfin MPV Player v$($note.version)", "日期：$($note.date)", "")
+          if ($note.summary) { $lines += @($note.summary, "") }
+          foreach ($section in $note.sections) {
+            $lines += "## $($section.title)"
+            foreach ($item in $section.items) { $lines += "- $item" }
+            $lines += ""
+          }
+          $lines -join "`n" | Set-Content -LiteralPath $notesFile -Encoding utf8
           $zip = "release/Jellyfin-MPV-Player-v$($package.version)-win-x64.zip"
           $checksum = "$zip.sha256"
-          gh release create $tag $zip $checksum --draft --verify-tag --title "Jellyfin MPV Player v$($package.version)" --notes-file release/发布信息/03-更新记录.txt
+          gh release create $tag $zip $checksum --draft --verify-tag --title "Jellyfin MPV Player v$($package.version)" --notes-file $notesFile
 
       - name: Download draft assets into a clean directory and smoke test
         shell: pwsh
