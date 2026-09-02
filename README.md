@@ -9,13 +9,13 @@ Jellyfin MPV Player 是一个非官方的 Windows x64 Jellyfin 桌面客户端�
 - MediaWarp 0.2.4 或更高版本
 - MPV 0.41 或更高版本
 
-播放器通过 MediaWarp 访问 Jellyfin，不附带 MPV 程序，也不附带 MPV 配置。稳定版下载地址在 [GitHub Releases](https://github.com/wzyoct/jellyfin-mpv-player/releases)。
+播放器通过 MediaWarp 访问 Jellyfin，不附带 MPV 程序，也不附带 MPV 配置。稳定版请从 [Latest Release](https://github.com/wzyoct/jellyfin-mpv-player/releases/latest) 下载，发行包名称为 `Jellyfin-MPV-Player-v<版本>-win-x64.zip`。
 
 ## 安装
 
 需要分别准备以下三部分：
 
-1. 下载 `Jellyfin-MPV-Player-v1.1.0-win-x64.zip`，解压到任意目录。
+1. 从 Latest Release 下载 `Jellyfin-MPV-Player-v<版本>-win-x64.zip`，解压到任意目录。
 2. 从 [MPV 官方安装页](https://mpv.io/installation/) 下载 Windows MPV，并记下 `mpv.exe` 的完整路径。
 3. 从独立的 [mpv-config Releases](https://github.com/wzyoct/mpv-config/releases) 下载 `mpv-portable-config-v1.0.0.zip`，将 ZIP 顶层的 `portable_config/` 解压到 `mpv.exe` 同目录。
 4. 启动 `Jellyfin MPV Player.exe`，在设置中填写你自己的 MPV 完整路径，然后连接经过 MediaWarp 的 Jellyfin 地址。
@@ -23,6 +23,14 @@ Jellyfin MPV Player 是一个非官方的 Windows x64 Jellyfin 桌面客户端�
 播放器的登录数据、缓存和日志只保存在解压目录的 `data/` 中。`data/` 不属于发行 ZIP，也不应提交到 Git。
 
 未配置 Windows 代码签名证书，首次启动时 SmartScreen 可能显示未知发布者提示；请先核对 Release 中的 SHA256 文件。
+
+## 兼容性与轨道规则
+
+继续观看使用 Jellyfin 的 `/Users/{userId}/Items/Resume` 端点，要求服务端或 MediaWarp 插件支持该标准接口；播放器不再调用旧的 `IsResumable` 过滤器。服务端返回顺序就是首页展示顺序，播放器只按完全相同的媒体 ID 稳定去重。
+
+字幕默认优先级为：外挂简中、外挂其他中文、服务端默认外挂、第一条外挂；只有没有外挂时才按内嵌简中、内嵌其他中文、服务端默认内嵌选择。`DeliveryMethod=Encode` 表示已烧录进画面的字幕，不作为可选轨道，也不会映射到 MPV。外挂字幕按 `DeliveryUrl → 本地鉴权网关 → MPV` 加载。
+
+遇到继续观看刷新或字幕加载问题，先在设置中打开日志目录，查看 `data/logs/` 中对应时间的 JSONL 日志，同时核对 MPV、MediaWarp 和 Jellyfin 版本；不要把令牌、设置或日志提交到仓库。
 
 ## 开发
 

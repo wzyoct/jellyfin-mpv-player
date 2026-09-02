@@ -10,11 +10,15 @@
 
 播放器通过 MediaWarp 发送 POST PlaybackInfo，并使用 MPV DeviceProfile。电视剧会将完整逻辑目录立即写入 MPV M3U，仅按当前集解析 PlaybackInfo，播放成功后单次预热下一集；未预热条目在被选中时按需解析。媒体源的 `DirectStreamUrl`、`TranscodingUrl`、`DeliveryUrl` 和 `DeliveryMethod` 是唯一播放路由来源，禁止读取 `.strm` 文本猜测网盘地址。
 
+首页继续观看专用调用 `/Users/{userId}/Items/Resume`，固定携带 `Limit=100`、`Recursive=true`、`MediaTypes=Video`、用户数据和卡片/图片字段。客户端保留服务端顺序，并按完全相同的 Item ID 稳定去重；初次加载错误进入首页错误状态，播放后刷新错误保留原列表并显示刷新失败通知。该流程不再调用 `Items?Filters=IsResumable`。
+
 每个播放会话启动一个绑定 `127.0.0.1` 的临时网关。每个逻辑条目只有一个本地能力 URL，资源解析器单飞并缓存成功结果；网关向服务端请求时附加 Jellyfin 鉴权，遇到无需专用请求头的 MediaWarp 302 时把重定向交给 MPV，跨域请求不携带 Jellyfin Token。网关同时处理外置字幕、Range、If-Range 和需要专用请求头的资源，最多跟随 10 次重定向；MPV 主动取消不会记为 502。
 
 ## 轨道与进度
 
-Jellyfin 的 Stream Index 在 MPV `track-list` 的 `ff-index` 中匹配，分别设置 `aid` 和 `sid`。起播集严格校验显式轨道索引，后续集优先按语言、标题和编码匹配，再回到每集默认轨道；关闭字幕是会话级偏好。PlaybackInfo 使用 60 秒独立超时，Playing、Progress 和 Stopped 请求统一由主进程发送，并在日志中只记录脱敏的媒体源、路由类型、准备阶段、耗时和状态码。
+Jellyfin 的 Stream Index 在 MPV `track-list` 的 `ff-index` 中匹配，分别设置 `aid` 和 `sid`。字幕选择不变量是：外挂简中、外挂其他中文、服务端默认外挂、第一条外挂；无外挂时才选择内嵌简中、内嵌其他中文、服务端默认内嵌，否则关闭。`DeliveryMethod=Encode` 等无独立轨道的烧录字幕被排除。起播集严格校验显式轨道索引和外挂/内嵌类别，后续集只在同类别内依次按语言与编码、标题与编码、语言、标题匹配，失败后执行该集默认规则；显式关闭字幕是会话级偏好。打开详情时只展示默认选择，只有实际改选或关闭才形成显式偏好。
+
+外挂字幕严格沿 `DeliveryUrl → 本地鉴权网关 → MPV sub-add <url> select` 数据流，网关负责 Jellyfin 鉴权和上游请求；内嵌字幕继续使用 MPV `track-list` 的 `ff-index` 映射 `sid`。缺少 `DeliveryUrl`、网关或 `sub-add` 失败都会抛出带片名的可见错误，不静默改选其他字幕。PlaybackInfo 使用 60 秒独立超时，Playing、Progress 和 Stopped 请求统一由主进程发送，并在日志中只记录脱敏的媒体源、路由类型、准备阶段、耗时和状态码。
 
 ## 配置与发布
 
