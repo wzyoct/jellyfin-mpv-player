@@ -5,6 +5,7 @@ export interface UserData {
   PlayedPercentage?: number
   Played?: boolean
   IsFavorite?: boolean
+  LastPlayedDate?: string
 }
 
 export interface MediaStream {
@@ -241,7 +242,7 @@ export interface PlaybackSnapshot {
 }
 
 export interface PlaybackEvent extends PlaybackSnapshot {
-  type: 'snapshot' | 'item-finalized' | 'progress' | 'sync-error' | 'error'
+  type: 'snapshot' | 'item-finalized' | 'progress' | 'sync-error' | 'warning' | 'error'
 }
 
 export interface PlaybackReportPayload {

@@ -493,15 +493,27 @@ async function activateLoadedEntry(session: PlaybackSession, entry: PlaybackEntr
   if (!entry.source || !entry.playbackInfo || !entry.routeKind) throw new Error(`《${entry.name}》播放资源尚未准备好`)
   entry.loaded = true
   if (entry.initialResumeTicks > 0) await seekEntry(session, entry, entry.initialResumeTicks)
+  let subtitleWarning: string | undefined
   if (entry.subtitleRoute) {
     const route = entry.subtitleRoute
     if (route.deliveryMethod.toLowerCase() === 'external' || route.isExternal) {
-      if (!route.deliveryUrl) throw new Error(`《${entry.name}》的外挂字幕没有可用的 DeliveryUrl`)
+      if (!route.deliveryUrl) {
+        if (session.subtitlePreference?.index !== undefined) throw new Error(`《${entry.name}》的外挂字幕没有可用的 DeliveryUrl`)
+        subtitleWarning = `《${entry.name}》外挂字幕没有可用的 DeliveryUrl，已继续无字幕播放`
+      }
       try {
-        const subtitleUrl = session.gateway.register({ upstreamUrl: getClient().resolveUrl(route.deliveryUrl) })
-        await session.ipc.send(['sub-add', subtitleUrl, 'select'])
+        if (route.deliveryUrl) {
+          const subtitleUrl = session.gateway.register({ upstreamUrl: getClient().resolveUrl(route.deliveryUrl) })
+          await session.ipc.send(['sub-add', subtitleUrl, 'select'])
+        }
       } catch (error) {
-        throw new Error(`《${entry.name}》外挂字幕加载失败：${error instanceof Error ? error.message : String(error)}`)
+        if (session.subtitlePreference?.index !== undefined) throw new Error(`《${entry.name}》外挂字幕加载失败：${error instanceof Error ? error.message : String(error)}`)
+        subtitleWarning = `《${entry.name}》外挂字幕加载失败，已继续无字幕播放`
+        logger.warn('playback', 'optional-subtitle-failed', { sessionId: session.sessionId, itemId: entry.itemId, streamIndex: route.streamIndex, reason: error })
+      }
+      if (subtitleWarning) {
+        entry.subtitleStreamIndex = undefined
+        entry.subtitleRoute = undefined
       }
     } else {
       const tracks = await session.ipc.getProperty('track-list')
@@ -536,7 +548,8 @@ async function activateLoadedEntry(session: PlaybackSession, entry: PlaybackEntr
   }
   session.phase = 'playing'
   logger.info('playback', 'playing', { sessionId: session.sessionId, itemId: entry.itemId, index: session.currentIndex })
-  emitPlayback('snapshot', session)
+  if (subtitleWarning) emitPlayback('warning', session, subtitleWarning)
+  else emitPlayback('snapshot', session)
   void prefetchNextEntry(session)
 }
 
@@ -946,7 +959,9 @@ async function startPlaybackInternal(request: StartPlaybackRequest): Promise<Pla
     session.currentEntry = selectedPlaylistEntry
     await activateLoadedEntry(session, selectedPlaylistEntry)
     session.startupPending = false
-    return emitPlayback('snapshot', session)
+    return lastSnapshot.sessionId === session.sessionId && lastSnapshot.message
+      ? lastSnapshot
+      : emitPlayback('snapshot', session)
   } catch (error) {
     session.startupPending = false
     await finishSession(session, 'error', true)

@@ -36,6 +36,7 @@ import MediaRail from './components/MediaRail.vue'
 import packageInfo from '../package.json'
 import releaseNotesData from './data/release-notes.json'
 import { contextualItemLabel, itemTypeLabel, mediaPresentation } from './mediaPresentation'
+import { normalizeResumeItems, promoteResumeItem } from './resumeItems'
 import { chooseDefaultSubtitle, isExternalSubtitle, isChineseSubtitle, isSelectableSubtitle } from './subtitlePreference'
 import type {
   MediaItem,
@@ -93,7 +94,7 @@ const errorMessage = ref('')
 const homeError = ref('')
 const recommendationError = ref('')
 const libraryError = ref('')
-const notice = ref<{ message: string; kind: 'success' | 'error' } | null>(null)
+const notice = ref<{ message: string; kind: 'success' | 'error' | 'warning' } | null>(null)
 const currentPlaybackId = ref('')
 const currentPlaybackPosition = ref(0)
 const lastPlaybackSyncError = ref('')
@@ -195,7 +196,7 @@ function streamLabel(stream: MediaStream, kind: 'audio' | 'subtitle'): string {
   return name
 }
 
-function showNotice(message: string, kind: 'success' | 'error' = 'success'): void {
+function showNotice(message: string, kind: 'success' | 'error' | 'warning' = 'success'): void {
   notice.value = { message, kind }
   if (noticeTimer) clearTimeout(noticeTimer)
   noticeTimer = setTimeout(() => {
@@ -246,6 +247,10 @@ function uniqueItems(items: MediaItem[]): MediaItem[] {
     seen.add(item.Id)
     return true
   })
+}
+
+function normalizeContinueItems(items: MediaItem[]): MediaItem[] {
+  return normalizeResumeItems(items)
 }
 
 function stopHeroAutoPlay(): void {
@@ -350,7 +355,7 @@ async function loadHome(): Promise<void> {
     recommendationItems.value = uniqueItems(recommendations.flatMap((category) => category.Items || []))
       .filter((item) => item.Type === 'Movie')
       .slice(0, 8)
-    continueItems.value = uniqueItems(continued.Items)
+    continueItems.value = normalizeContinueItems(continued.Items)
     nextUpItems.value = uniqueItems(nextUp.Items || []).slice(0, 24)
     homeAllItems.value = uniqueItems(allItems)
     homeMovieItems.value = homeAllItems.value.filter((item) => item.Type === 'Movie')
@@ -371,7 +376,7 @@ async function refreshContinueItems(): Promise<void> {
   if (!isConnected.value) return
   try {
     const continued = await window.jellyfin.getResumeItems()
-    continueItems.value = uniqueItems(continued.Items)
+    continueItems.value = normalizeContinueItems(continued.Items)
     const nextUp = await window.jellyfin.getNextUp().catch(() => ({ Items: [], TotalRecordCount: 0 }))
     nextUpItems.value = uniqueItems(nextUp.Items || []).slice(0, 24)
   } catch (error) {
@@ -730,7 +735,9 @@ function handlePlaybackSnapshot(snapshot: PlaybackSnapshot): void {
   } else if (!snapshot.syncError) {
     lastPlaybackSyncError.value = ''
   }
-  if (snapshot.phase === 'error' && snapshot.message) showNotice(snapshot.message, 'error')
+  if (snapshot.message && (snapshot.phase === 'playing' || snapshot.phase === 'error')) {
+    showNotice(snapshot.message, snapshot.phase === 'error' ? 'error' : 'warning')
+  }
 }
 
 async function refreshPlaybackData(snapshot: PlaybackSnapshot, notifyOnFailure = true): Promise<void> {
@@ -742,19 +749,24 @@ async function refreshPlaybackData(snapshot: PlaybackSnapshot, notifyOnFailure =
     if (delay) await new Promise((resolve) => setTimeout(resolve, delay))
     try {
       lastItem = await window.jellyfin.getItem(itemId)
-      const update = (items: MediaItem[]) => items.map((item) => item.Id === lastItem?.Id ? { ...item, ...lastItem } : item)
-      libraryItems.value = update(libraryItems.value)
-      homeAllItems.value = update(homeAllItems.value)
-      homeMovieItems.value = update(homeMovieItems.value)
-      homeShowItems.value = update(homeShowItems.value)
-      latestItems.value = update(latestItems.value)
-      continueItems.value = update(continueItems.value)
-      nextUpItems.value = update(nextUpItems.value)
       const serverPosition = lastItem.UserData?.PlaybackPositionTicks || 0
       const expectedPosition = snapshot.positionTicks || 0
       confirmed = expectedPosition < 10_000_000 || Boolean(lastItem.UserData?.Played) || Math.abs(serverPosition - expectedPosition) <= 150_000_000
       if (confirmed) {
-        await refreshContinueItems()
+        const [refreshed, nextUp] = await Promise.all([
+          window.jellyfin.getResumeItems(),
+          window.jellyfin.getNextUp().catch(() => ({ Items: [], TotalRecordCount: 0 })),
+        ])
+        const update = (items: MediaItem[]) => items.map((item) => item.Id === lastItem?.Id ? { ...item, ...lastItem } : item)
+        libraryItems.value = update(libraryItems.value)
+        homeAllItems.value = update(homeAllItems.value)
+        homeMovieItems.value = update(homeMovieItems.value)
+        homeShowItems.value = update(homeShowItems.value)
+        latestItems.value = update(latestItems.value)
+        continueItems.value = lastItem
+          ? promoteResumeItem(normalizeContinueItems(refreshed.Items), lastItem)
+          : normalizeContinueItems(refreshed.Items)
+        nextUpItems.value = uniqueItems(nextUp.Items || []).slice(0, 24)
         return
       }
     } catch {
