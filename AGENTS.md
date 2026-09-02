@@ -44,3 +44,10 @@
 - `src/data/release-notes.json` 是版本记录的单一来源；`CHANGELOG.md` 必须通过发布脚本从该文件生成，禁止只保留 `Unreleased` 而不结算正式版本。
 - 发布前必须运行 `npm run release:check`，确保包版本、锁文件、更新记录和客户端运行时版本一致。
 - 桌面端用户可见改动在源码验证和构建后，必须继续运行 `npm run release:windows` 重新生成 `release/Ember Player.exe`；交付前核对便携版启动说明中的版本号和 exe 的更新时间，不能只交付 `dist` 或 `dist-electron`。
+
+### 本地发布同步
+
+- 每次发布或交付桌面端改动前，先检查 Jellyfin MPV Player 是否正在运行；如果正在运行，先关闭该程序，再覆盖本地发布文件。
+- 发布完成后必须同时更新版本号 ZIP 及 `release` 根目录的完整便携运行文件，确保可以直接双击 `release/Jellyfin MPV Player.exe` 启动最新版。
+- 同步根目录时必须保留 `release/data` 中的用户数据和日志，不得用构建产物覆盖或删除该目录。
+- 最终核对 `release/00-启动说明.txt`、`release/resources/app.asar` 和 `release/Jellyfin MPV Player.exe` 的版本/更新时间，并确认根目录启动文件与版本号 ZIP 来自同一次构建。
