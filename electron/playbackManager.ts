@@ -539,7 +539,10 @@ async function activateLoadedEntry(session: PlaybackSession, entry: PlaybackEntr
       }
       try {
         if (route.deliveryUrl) {
-          const subtitleUrl = session.gateway.register({ upstreamUrl: getClient().resolveUrl(route.deliveryUrl) })
+          const subtitleUrl = session.gateway.register({
+            upstreamUrl: getClient().buildSubtitleUrl(entry.itemId, entry.source, { Index: route.streamIndex, Codec: route.codec }, entry.playbackInfo.PlaySessionId),
+            requiredHeaders: { Authorization: getClient().buildAuthorization() },
+          })
           await session.ipc.send(['sub-add', subtitleUrl, 'select'])
         }
       } catch (error) {

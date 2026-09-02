@@ -128,6 +128,12 @@ describe('Jellyfin client contract', () => {
     expect(new URL(stream).pathname).toBe('/Videos/item-1/master.m3u8')
   })
 
+  it('builds an authenticated standard Jellyfin subtitle URL', () => {
+    const client = new JellyfinClient('http://media.example.test', 'token-1', 'user-1', identity)
+    expect(client.buildSubtitleUrl('item-1', { Id: 'source-1' }, { Index: 3, Codec: 'ass' }, 'session-1'))
+      .toBe('http://media.example.test/Videos/item-1/source-1/Subtitles/3/0/Stream.ass?PlaySessionId=session-1')
+  })
+
   it('resolves direct play, direct stream, and transcode routes without fallback', () => {
     const client = new JellyfinClient('https://media.example.test', 'token', 'user-1', identity)
     expect(client.buildPlaybackRoute('movie-1', {

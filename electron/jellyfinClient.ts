@@ -538,6 +538,13 @@ export class JellyfinClient {
     }
   }
 
+  buildSubtitleUrl(itemId: string, source: MediaSourceInfo, stream: { Index: number; Codec?: string }, playSessionId?: string): string {
+    const format = (stream.Codec || 'srt').toLowerCase()
+    const url = new URL(this.resolveUrl(`/Videos/${encodeURIComponent(itemId)}/${encodeURIComponent(source.Id)}/Subtitles/${stream.Index}/0/Stream.${encodeURIComponent(format)}`))
+    if (playSessionId) url.searchParams.set('PlaySessionId', playSessionId)
+    return url.toString()
+  }
+
   async reportPlaying(payload: PlaybackReportPayload): Promise<void> {
     await this.request('/Sessions/Playing', {
       method: 'POST',
