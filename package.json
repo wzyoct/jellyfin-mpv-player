@@ -1,11 +1,14 @@
 {
   "name": "jellyfin-mpv-player",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "An unofficial Windows x64 Jellyfin client powered by MPV.",
   "productName": "Jellyfin MPV Player",
   "main": "dist-electron/electron/main.js",
   "author": "Jellyfin MPV Player",
   "license": "MIT",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "scripts": {
     "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && electron .\"",
     "clean": "node scripts/clean-build.cjs",
