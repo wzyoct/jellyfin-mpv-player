@@ -241,7 +241,8 @@ async function prepareEntry(session: PlaybackSession, item: MediaItem, startTime
     || sources.find((candidate) => candidate.SupportsDirectStream)
     || sources[0]
   const streams = (source.MediaStreams || item.MediaStreams || []) as MediaStream[]
-  const localSubtitlePath = !session.subtitlePreference ? findSidecarSubtitle(source.Path) : undefined
+  const serverSubtitles = streams.filter(isSelectableSubtitle)
+  const localSubtitlePath = !session.subtitlePreference && serverSubtitles.length === 0 ? findSidecarSubtitle(source.Path) : undefined
   const audioStreamIndex = chooseAudio(streams, session.audioPreference, isSelected)
   const subtitleStreamIndex = localSubtitlePath ? undefined : chooseSubtitle(streams, session.subtitlePreference, isSelected)
   if (isSelected && session.audioPreference?.index !== undefined && audioStreamIndex === undefined) {
@@ -535,34 +536,45 @@ async function activateLoadedEntryInternal(session: PlaybackSession, entry: Play
   const localSubtitlePath = entry.localSubtitlePath
   if (localSubtitlePath) {
     try {
+      logger.info('playback', 'subtitle-route-resolved', { sessionId: session.sessionId, itemId: entry.itemId, source: 'sidecar' })
+      logger.info('playback', 'subtitle-add-start', { sessionId: session.sessionId, itemId: entry.itemId, source: 'sidecar' })
       await session.ipc.send(['sub-add', localSubtitlePath, 'select', EXTERNAL_SUBTITLE_TITLE])
-      logger.info('playback', 'local-subtitle-added', { sessionId: session.sessionId, itemId: entry.itemId })
+      logger.info('playback', 'subtitle-add-complete', { sessionId: session.sessionId, itemId: entry.itemId, source: 'sidecar' })
+      logger.info('playback', 'subtitle-selected', { sessionId: session.sessionId, itemId: entry.itemId, source: 'sidecar' })
     } catch (error) {
       subtitleWarning = `《${entry.name}》同目录外挂字幕加载失败，已继续无字幕播放`
-      logger.warn('playback', 'optional-local-subtitle-failed', { sessionId: session.sessionId, itemId: entry.itemId, reason: error })
+      logger.warn('playback', 'subtitle-failed', { sessionId: session.sessionId, itemId: entry.itemId, source: 'sidecar', reason: error instanceof Error ? error.message : String(error) })
     }
   } else if (entry.subtitleRoute) {
     const route = entry.subtitleRoute
     if (route.deliveryMethod.toLowerCase() === 'external' || route.isExternal) {
-      if (!route.deliveryUrl) {
-        if (session.subtitlePreference?.index !== undefined) throw new Error(`《${entry.name}》的外挂字幕没有可用的 DeliveryUrl`)
-        subtitleWarning = `《${entry.name}》外挂字幕没有可用的 DeliveryUrl，已继续无字幕播放`
-      }
       try {
-        if (route.deliveryUrl) {
-          const subtitleUrl = session.gateway.register({
-            upstreamUrl: getClient().buildSubtitleUrl(entry.itemId, entry.source, { Index: route.streamIndex, Codec: route.codec }, entry.playbackInfo.PlaySessionId),
-            requiredHeaders: { Authorization: getClient().buildAuthorization() },
-          })
-          await session.ipc.send(['sub-add', subtitleUrl, 'select', EXTERNAL_SUBTITLE_TITLE])
-        }
+        const client = getClient()
+        const upstreamUrl = client.buildSubtitleUrl(entry.itemId, entry.source, { Index: route.streamIndex, Codec: route.codec }, entry.playbackInfo.PlaySessionId)
+        const subtitleUrl = session.gateway.register({ upstreamUrl, requiredHeaders: { Authorization: client.buildAuthorization() } })
+        logger.info('playback', 'subtitle-route-resolved', { sessionId: session.sessionId, itemId: entry.itemId, source: 'jellyfin-external', streamIndex: route.streamIndex, codec: route.codec || 'srt', hasDeliveryUrl: Boolean(route.deliveryUrl) })
+        logger.info('playback', 'subtitle-gateway-registered', { sessionId: session.sessionId, itemId: entry.itemId, streamIndex: route.streamIndex })
+        logger.info('playback', 'subtitle-add-start', { sessionId: session.sessionId, itemId: entry.itemId, streamIndex: route.streamIndex })
+        const beforeTracks = await session.ipc.getProperty('track-list')
+        await session.ipc.send(['sub-add', subtitleUrl, 'select', EXTERNAL_SUBTITLE_TITLE])
+        logger.info('playback', 'subtitle-add-complete', { sessionId: session.sessionId, itemId: entry.itemId, streamIndex: route.streamIndex })
+        const afterTracks = await session.ipc.getProperty('track-list')
+        const beforeIds = new Set(Array.isArray(beforeTracks) ? beforeTracks.map((track) => (track as { type?: unknown; id?: unknown }).type === 'sub' ? (track as { id?: unknown }).id : undefined) : [])
+        const newTrack = Array.isArray(afterTracks)
+          ? (afterTracks as Array<{ type?: unknown; id?: unknown; title?: unknown; lang?: unknown }>).find((track) => track.type === 'sub' && typeof track.id === 'number' && !beforeIds.has(track.id))
+          : undefined
+        const sid = await session.ipc.getProperty('sid')
+        if (newTrack && sid !== newTrack.id) await session.ipc.setProperty('sid', newTrack.id)
+        logger.info('playback', 'subtitle-selected', { sessionId: session.sessionId, itemId: entry.itemId, streamIndex: route.streamIndex, mpvTrackId: newTrack?.id, sid: newTrack?.id ?? sid })
       } catch (error) {
-        if (session.subtitlePreference?.index !== undefined) throw new Error(`《${entry.name}》外挂字幕加载失败：${error instanceof Error ? error.message : String(error)}`)
+        const message = error instanceof Error ? error.message : String(error)
+        logger.warn('playback', 'subtitle-failed', { sessionId: session.sessionId, itemId: entry.itemId, streamIndex: route.streamIndex, reason: message })
+        if (session.subtitlePreference?.index !== undefined) throw new Error(`《${entry.name}》外挂字幕加载失败：${message}`)
         subtitleWarning = `《${entry.name}》外挂字幕加载失败，已继续无字幕播放`
-        logger.warn('playback', 'optional-subtitle-failed', { sessionId: session.sessionId, itemId: entry.itemId, streamIndex: route.streamIndex, reason: error })
       }
       if (subtitleWarning) {
         try {
+          if (!session.ipc.isConnected || session.process.killed) throw new Error('MPV IPC 已断开')
           await session.ipc.setProperty('sid', 'no')
         } catch (error) {
           logger.warn('playback', 'subtitle-disable-failed', { sessionId: session.sessionId, itemId: entry.itemId, reason: error })
@@ -591,6 +603,7 @@ async function activateLoadedEntryInternal(session: PlaybackSession, entry: Play
     }
   }
   entry.isPaused = false
+  if (!session.ipc.isConnected || session.process.killed) throw new Error('MPV IPC 已断开')
   await session.ipc.setProperty('pause', false)
   entry.loaded = true
   const client = optionalClient()

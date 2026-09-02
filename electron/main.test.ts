@@ -75,6 +75,10 @@ class FakeMpvIpc {
     mocks.mpvInstances.push(this)
   }
 
+  get isConnected(): boolean {
+    return true
+  }
+
   onEvent(callback: (message: MpvIpcMessage) => void): void {
     this.eventHandler = callback
   }
@@ -400,9 +404,7 @@ describe('Electron main process IPC orchestration', () => {
     vi.mocked(existsSync).mockReturnValueOnce(true)
     mocks.fetchMock.mockImplementation(async (url: string) => {
       if (url.includes('/Items/movie-strm-sidecar/PlaybackInfo')) return jsonResponse({
-        MediaSources: [{ Id: 'strm-sidecar-source', Path: 'C:\\Media\\字幕\\movie.strm', SupportsDirectPlay: true, MediaStreams: [
-          { Type: 'Subtitle', Index: 0, DeliveryMethod: 'External', DeliveryUrl: '/broken-subtitle.srt' },
-        ] }],
+        MediaSources: [{ Id: 'strm-sidecar-source', Path: 'C:\\Media\\字幕\\movie.strm', SupportsDirectPlay: true, MediaStreams: [] }],
       })
       if (url.includes('/Users/user-1/Items/movie-strm-sidecar')) return jsonResponse(movie)
       return new Response(null, { status: 204 })
@@ -702,7 +704,7 @@ describe('Electron main process IPC orchestration', () => {
     })).rejects.toThrow('未找到用户指定的字幕轨道 8')
   })
 
-  it('keeps MPV playing when an automatic external subtitle has no URL', async () => {
+  it('loads an automatic external subtitle through the standard API when DeliveryUrl is missing', async () => {
     const movie = { Id: 'movie-strm', Name: 'STRM 测试', Type: 'Movie', MediaStreams: [{ Type: 'Subtitle', Index: 4, DeliveryMethod: 'External' }] }
     mocks.waitSequences.push([
       { event: 'start-file', playlist_entry_id: 1 },
@@ -715,10 +717,10 @@ describe('Electron main process IPC orchestration', () => {
     })
 
     const snapshot = await handler('playback:start')({}, { itemId: movie.Id })
-    expect(snapshot).toMatchObject({ phase: 'playing', message: expect.stringContaining('无字幕播放') })
+    expect(snapshot).toMatchObject({ phase: 'playing' })
     expect(mocks.spawnMock.mock.results.at(-1)?.value.kill).not.toHaveBeenCalled()
-    expect(mocks.mpvInstances.at(-1)?.setProperty).toHaveBeenCalledWith('sid', 'no')
-    expect(mocks.fetchMock.mock.calls.some(([url, options]) => url.includes('/Sessions/Playing/Progress') && JSON.stringify(options).includes('SubtitleStreamIndex'))).toBe(false)
+    expect(mocks.mpvInstances.at(-1)?.send.mock.calls.some(([command]) => command[0] === 'sub-add')).toBe(true)
+    expect(mocks.fetchMock.mock.calls.some(([url]) => String(url).includes('/Videos/movie-strm/strm-source/Subtitles/4/0/Stream.srt'))).toBe(false)
   })
 
   it('surfaces named errors for missing and failed external subtitle loading', async () => {
@@ -729,7 +731,10 @@ describe('Electron main process IPC orchestration', () => {
       if (url.includes('/Users/user-1/Items/movie-external-subtitle-error')) return jsonResponse(movie)
       return new Response(null, { status: 204 })
     })
-    await expect(handler('playback:start')({}, { itemId: movie.Id, subtitlePreference: { index: 7, isExternal: true } })).rejects.toThrow('《外挂字幕错误》的外挂字幕没有可用的 DeliveryUrl')
+    const missingUrlSnapshot = await handler('playback:start')({}, { itemId: movie.Id, subtitlePreference: { index: 7, isExternal: true } })
+    expect(missingUrlSnapshot.phase).toBe('playing')
+    expect(mocks.mpvInstances.at(-1)?.send.mock.calls.some(([command]) => command[0] === 'sub-add')).toBe(true)
+    await handler('playback:command')({}, { sessionId: missingUrlSnapshot.sessionId, command: 'stop' })
 
     mocks.fetchMock.mockImplementation(async (url: string) => {
       if (url.includes('/Items/movie-external-subtitle-error/PlaybackInfo')) return jsonResponse(playbackInfo('/subtitles/error.ass'))

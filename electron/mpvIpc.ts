@@ -72,6 +72,10 @@ export class MpvIpc {
 
   constructor(private readonly pipeName: string) {}
 
+  get isConnected(): boolean {
+    return Boolean(this.socket && !this.socket.destroyed)
+  }
+
   onEvent(listener: (message: MpvIpcMessage) => void): () => void {
     this.eventListeners.add(listener)
     return () => this.eventListeners.delete(listener)
