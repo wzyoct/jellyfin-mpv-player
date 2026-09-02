@@ -66,6 +66,14 @@ onUnmounted(() => {
 })
 
 watch(() => props.items, () => nextTick(updateScrollState), { deep: true })
+watch(() => props.items[0]?.Id, (next, previous) => {
+  if (!next || next === previous) return
+  void nextTick(() => {
+    if (!rail.value) return
+    rail.value.scrollLeft = 0
+    updateScrollState()
+  })
+})
 </script>
 
 <template>

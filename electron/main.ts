@@ -287,6 +287,7 @@ function registerIpc(): void {
   })
   ipcMain.handle('jellyfin:get-views', () => getClient().getViews())
   ipcMain.handle('jellyfin:get-items', (_event, query) => getClient().getItems(query || {}))
+  ipcMain.handle('jellyfin:get-resume-items', () => getClient().getResumeItems())
   ipcMain.handle('jellyfin:get-movie-recommendations', () => getClient().getMovieRecommendations())
   ipcMain.handle('jellyfin:get-item', (_event, itemId: string) => getClient().getItem(requireText(itemId, '媒体 ID')))
   ipcMain.handle('jellyfin:get-playback-info', (_event, itemId: string, request?: PlaybackInfoRequest) => getClient().getPlaybackInfo(requireText(itemId, '媒体 ID'), request))

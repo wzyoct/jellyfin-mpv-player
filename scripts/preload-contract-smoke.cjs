@@ -54,6 +54,7 @@ const expectedMethods = [
   'logout',
   'getViews',
   'getItems',
+  'getResumeItems',
   'getMovieRecommendations',
   'getItem',
   'getPlaybackInfo',

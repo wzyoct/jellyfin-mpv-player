@@ -317,7 +317,6 @@ export class JellyfinClient {
     sortOrder?: string
     startIndex?: number
     limit?: number
-    isResumable?: boolean
     filters?: string
     seriesId?: string
   } = {}): Promise<ItemResult> {
@@ -339,10 +338,27 @@ export class JellyfinClient {
     if (options.seriesId) params.set('SeriesId', options.seriesId)
     if (options.searchTerm) params.set('SearchTerm', options.searchTerm)
     if (options.filters) params.set('Filters', options.filters)
-    if (options.isResumable) params.set('Filters', 'IsResumable')
     return parseQueryResult<MediaItem>(
       await this.request(`/Users/${encodeURIComponent(this.userId)}/Items?${params.toString()}`),
       '/Users/{UserId}/Items',
+    ) as ItemResult
+  }
+
+  async getResumeItems(): Promise<ItemResult> {
+    const params = new URLSearchParams({
+      UserId: this.userId,
+      Limit: '100',
+      Recursive: 'true',
+      MediaTypes: 'Video',
+      Fields: 'Overview,Genres,MediaStreams,ProviderIds,DateCreated,UserData',
+      EnableImages: 'true',
+      EnableImageTypes: 'Primary,Backdrop,Thumb',
+      EnableUserData: 'true',
+      ImageTypeLimit: '1',
+    })
+    return parseQueryResult<MediaItem>(
+      await this.request(`/Users/${encodeURIComponent(this.userId)}/Items/Resume?${params.toString()}`),
+      '/Users/{UserId}/Items/Resume',
     ) as ItemResult
   }
 

@@ -29,6 +29,14 @@ async function run() {
   assert.match(lastUrl, /\/Users\/user\/Views$/)
   assert.match(lastInit.headers.get('Authorization'), /Token="token"/)
 
+  responseBody = { Items: [{ Id: 'resume-1' }], TotalRecordCount: 1 }
+  assert.deepEqual(await client.getResumeItems(), responseBody)
+  assert.match(lastUrl, /\/Users\/user\/Items\/Resume\?/)
+  const resumeUrl = new URL(lastUrl)
+  assert.equal(resumeUrl.searchParams.get('Limit'), '100')
+  assert.equal(resumeUrl.searchParams.get('Recursive'), 'true')
+  assert.equal(resumeUrl.searchParams.get('MediaTypes'), 'Video')
+
   responseBody = { MediaSources: [{ Id: 'source-1', SupportsDirectPlay: true }] }
   await client.getPlaybackInfo('movie-1', { mediaSourceId: 'source-1', audioStreamIndex: 1, subtitleStreamIndex: 2, startTimeTicks: 40 })
   assert.match(lastUrl, /\/Items\/movie-1\/PlaybackInfo$/)

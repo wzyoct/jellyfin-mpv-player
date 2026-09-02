@@ -23,6 +23,7 @@ const api: JellyfinApi = {
   logout: () => invoke('jellyfin:logout'),
   getViews: () => invoke('jellyfin:get-views'),
   getItems: (query?: ItemsQuery) => invoke('jellyfin:get-items', query),
+  getResumeItems: () => invoke('jellyfin:get-resume-items'),
   getMovieRecommendations: () => invoke('jellyfin:get-movie-recommendations'),
   getItem: (itemId: string) => invoke('jellyfin:get-item', itemId),
   getPlaybackInfo: (itemId: string, request?: PlaybackInfoRequest) => invoke('jellyfin:get-playback-info', itemId, request),

@@ -164,7 +164,6 @@ export interface ItemsQuery {
   sortOrder?: 'Ascending' | 'Descending'
   startIndex?: number
   limit?: number
-  isResumable?: boolean
   filters?: string
   seriesId?: string
 }
@@ -188,6 +187,7 @@ export interface AudioPreference {
 export interface SubtitlePreference {
   index?: number
   disabled?: boolean
+  isExternal?: boolean
   language?: string
   title?: string
   codec?: string
@@ -290,6 +290,7 @@ export interface JellyfinApi {
   logout(): Promise<PublicSettings>
   getViews(): Promise<MediaView[]>
   getItems(query?: ItemsQuery): Promise<ItemResult>
+  getResumeItems(): Promise<ItemResult>
   getMovieRecommendations(): Promise<RecommendationDto[]>
   getItem(itemId: string): Promise<MediaItem>
   getPlaybackInfo(itemId: string, request?: PlaybackInfoRequest): Promise<PlaybackInfo>
