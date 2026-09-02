@@ -68,6 +68,23 @@ describe('PlaybackGateway', () => {
     await gateway.dispose()
   })
 
+  it('supports HEAD without reading or forwarding a response body', async () => {
+    const source = await listen((request, response) => {
+      expect(request.method).toBe('HEAD')
+      response.writeHead(200, { 'content-type': 'video/mp4', 'content-length': '5' })
+      response.end('hello')
+    })
+    const client = new JellyfinClient(source.url, 'token', 'user-1', identity)
+    const gateway = new PlaybackGateway(client)
+    await gateway.start()
+    const url = gateway.register({ upstreamUrl: `${source.url}/movie.mp4` })
+    const response = await fetch(url, { method: 'HEAD' })
+    expect(response.status).toBe(200)
+    expect(response.headers.get('content-length')).toBe('5')
+    expect(await response.text()).toBe('')
+    await gateway.dispose()
+  })
+
   it('follows multiple relative redirects with required headers and records the final response', async () => {
     const final = await listen((request, response) => {
       expect(request.headers.referer).toBe('https://alist.example')
@@ -132,7 +149,7 @@ describe('PlaybackGateway', () => {
     await gateway.dispose()
   })
 
-  it('resolves lazy resources once and retries after a failed resolution', async () => {
+  it('retries lazy resource resolution after a failed attempt', async () => {
     const source = await listen((_request, response) => {
       response.writeHead(200, { 'content-type': 'video/mp4' })
       response.end('lazy')
@@ -144,13 +161,51 @@ describe('PlaybackGateway', () => {
     const url = gateway.register({
       resolve: async () => {
         calls += 1
+        if (calls === 1) throw new Error('temporary resolver failure')
         return { upstreamUrl: `${source.url}/movie.mp4` }
       },
     })
-    const [first, second] = await Promise.all([fetch(url), fetch(url)])
-    expect(await first.text()).toBe('lazy')
+    const first = await fetch(url)
+    expect(first.status).toBe(502)
+    const second = await fetch(url)
+    expect(second.status).toBe(200)
     expect(await second.text()).toBe('lazy')
-    expect(calls).toBe(1)
+    expect(calls).toBe(2)
+    await gateway.dispose()
+  })
+
+  it('returns 502 for an invalid upstream redirect', async () => {
+    const source = await listen((_request, response) => {
+      response.writeHead(302, { Location: 'file:///private/movie.mp4' })
+      response.end()
+    })
+    const client = new JellyfinClient(source.url, 'token', 'user-1', identity)
+    const gateway = new PlaybackGateway(client)
+    await gateway.start()
+    const url = gateway.register({ upstreamUrl: `${source.url}/movie.mp4` })
+    const response = await fetch(url)
+    expect(response.status).toBe(502)
+    expect(await response.text()).toContain('播放网关请求失败')
+    expect(gateway.getDiagnostic(url)).toMatchObject({ status: 502, source: 'gateway', phase: 'gateway' })
+    await gateway.dispose()
+  })
+
+  it('cancels an in-flight upstream request when the client disconnects', async () => {
+    let requestStarted: (() => void) | undefined
+    const started = new Promise<void>((resolve) => { requestStarted = resolve })
+    const source = await listen((request, response) => {
+      requestStarted?.()
+      request.once('aborted', () => response.destroy())
+    })
+    const client = new JellyfinClient(source.url, 'token', 'user-1', identity)
+    const gateway = new PlaybackGateway(client)
+    await gateway.start()
+    const url = gateway.register({ upstreamUrl: `${source.url}/movie.mp4` })
+    const controller = new AbortController()
+    const request = fetch(url, { signal: controller.signal })
+    await started
+    controller.abort()
+    await expect(request).rejects.toMatchObject({ name: 'AbortError' })
     await gateway.dispose()
   })
 

@@ -1,5 +1,6 @@
 const crypto = require('node:crypto')
 const fs = require('node:fs')
+const os = require('node:os')
 const path = require('node:path')
 const { spawnSync } = require('node:child_process')
 
@@ -10,11 +11,8 @@ const releaseNotes = JSON.parse(fs.readFileSync(path.join(root, 'src/data/releas
 const version = packageInfo.version
 const release = releaseNotes.find((item) => item.version === version)
 const releaseDate = release?.date || new Date().toISOString().slice(0, 10)
-const historyDirectory = path.join(releaseRoot, '历史版本')
-const internalDirectory = path.join(releaseRoot, '构建内部文件')
-const rawDirectory = path.join(releaseRoot, 'build')
-const stagingDirectory = path.join(rawDirectory, 'win-unpacked')
-const infoDirectory = path.join(releaseRoot, '发布信息')
+const archiveName = `Jellyfin-MPV-Player-v${version}-win-x64.zip`
+const checksumName = `${archiveName}.sha256`
 const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm'
 const builderCommand = path.join(root, 'node_modules', '.bin', process.platform === 'win32' ? 'electron-builder.cmd' : 'electron-builder')
 
@@ -26,61 +24,16 @@ function run(command, args) {
     }).join(' ')
     const result = spawnSync(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', commandLine], { cwd: root, stdio: 'inherit', shell: false })
     if (result.error) throw result.error
-    if (result.status !== 0) process.exit(result.status || 1)
+    if (result.status !== 0) throw new Error(`${command} ${args.join(' ')} failed with exit code ${result.status}`)
     return
   }
   const result = spawnSync(command, args, { cwd: root, stdio: 'inherit', shell: false })
   if (result.error) throw result.error
-  if (result.status !== 0) process.exit(result.status || 1)
+  if (result.status !== 0) throw new Error(`${command} ${args.join(' ')} failed with exit code ${result.status}`)
 }
 
 function ensureDirectory(directory) {
   fs.mkdirSync(directory, { recursive: true })
-}
-
-function uniqueDirectory(directory, name) {
-  let candidate = path.join(directory, name)
-  let suffix = 2
-  while (fs.existsSync(candidate)) {
-    candidate = path.join(directory, `${name}-${suffix}`)
-    suffix += 1
-  }
-  return candidate
-}
-
-function detectVersion(source, entryName) {
-  const match = entryName.match(/\d+\.\d+\.\d+/)
-  if (match) return match[0]
-  if (!fs.statSync(source).isFile()) return undefined
-  try {
-    return fs.readFileSync(source, 'utf8').match(/v(\d+\.\d+\.\d+)/)?.[1]
-  } catch {
-    return undefined
-  }
-}
-
-function moveToArchive(source, directory) {
-  ensureDirectory(directory)
-  fs.renameSync(source, uniqueDirectory(directory, path.basename(source)))
-}
-
-function archiveExistingOutput() {
-  ensureDirectory(historyDirectory)
-  ensureDirectory(internalDirectory)
-  ensureDirectory(infoDirectory)
-  if (!fs.existsSync(releaseRoot)) return
-
-  for (const entry of fs.readdirSync(releaseRoot, { withFileTypes: true })) {
-    const source = path.join(releaseRoot, entry.name)
-    if (entry.name === 'data' || entry.name === '历史版本' || entry.name === '构建内部文件') continue
-    const versionHint = detectVersion(source, entry.name) || '0.7.0'
-    const isRuntime = entry.name === 'Jellyfin MPV Player.exe'
-      || entry.name === 'resources'
-      || entry.name === 'locales'
-      || /\.(dll|pak|bin|dat|json)$/.test(entry.name)
-    if (isRuntime) moveToArchive(source, path.join(internalDirectory, '旧运行文件', versionHint))
-    else moveToArchive(source, path.join(historyDirectory, versionHint))
-  }
 }
 
 function writeTextFile(filePath, content) {
@@ -99,73 +52,79 @@ function formatReleaseNotes(note) {
   return lines.join('\n')
 }
 
-function writeGuides() {
+function writeGuides(directory) {
   if (!release) throw new Error(`找不到 ${version} 的更新记录`)
-  writeTextFile(path.join(releaseRoot, '00-启动说明.txt'), `
+  writeTextFile(path.join(directory, '00-启动说明.txt'), `
 Jellyfin MPV Player Windows 便携版启动说明
 当前版本：v${version}
 发布日期：${releaseDate}
 
 启动方式：
-1. 保持本文件与“Jellyfin MPV Player.exe”位于同一个 release 文件夹。
-2. 双击“Jellyfin MPV Player.exe”即可启动，无需安装、无需解压。
-3. 登录配置、缓存和运行数据保存在同目录的 data 文件夹。
+1. 解压本 ZIP，并双击“Jellyfin MPV Player.exe”即可启动，无需安装。
+2. 在设置中填写你自己的 MPV 完整路径，例如 C:\\tools\\mpv\\mpv.exe。
+3. 登录配置、缓存和运行数据保存在应用目录的 data 文件夹。
 
-播放媒体前，请在 Jellyfin MPV Player 设置中确认 MPV 路径有效。
-MPV 默认使用 C:\\green\\mpv\\mpv.exe；便携版不会把 MPV 打包进应用。
+播放器不会附带 MPV 或 MPV 配置。请分别下载官方 MPV 和 portable_config 配置包。
 不要移动、删除或改名 resources、locales、DLL、PAK 文件。
 `)
-  writeTextFile(path.join(infoDirectory, '03-更新记录.txt'), formatReleaseNotes(release))
+  writeTextFile(path.join(directory, '发布信息', '03-更新记录.txt'), formatReleaseNotes(release))
 }
 
-function runtimeFiles(directory) {
-  const files = []
-  const visit = (current) => {
-    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
-      const fullPath = path.join(current, entry.name)
-      if (entry.name === 'data' || entry.name === '历史版本' || entry.name === '构建内部文件' || entry.name === '发布信息') continue
-      if (entry.isDirectory()) visit(fullPath)
-      else files.push(fullPath)
-    }
-  }
-  visit(directory)
-  return files.sort()
-}
-
-function writeChecksums() {
-  const files = runtimeFiles(releaseRoot)
-  const lines = [`Jellyfin MPV Player v${version} 运行文件 SHA256 校验值`, `生成日期：${releaseDate}`, '明确排除：data 文件夹（便携配置、令牌和缓存）', '']
-  for (const file of files) {
-    const hash = crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex')
-    lines.push(`${hash}  ${path.relative(releaseRoot, file)}`)
-  }
-  writeTextFile(path.join(infoDirectory, '04-文件校验值-SHA256.txt'), lines.join('\n'))
-}
-
-function copyRuntime() {
-  if (!fs.existsSync(stagingDirectory)) throw new Error(`没有找到解包构建目录：${stagingDirectory}`)
-  for (const entry of fs.readdirSync(stagingDirectory, { withFileTypes: true })) {
-    const source = path.join(stagingDirectory, entry.name)
-    const target = path.join(releaseRoot, entry.name)
+function copyDirectoryContents(sourceDirectory, targetDirectory) {
+  ensureDirectory(targetDirectory)
+  for (const entry of fs.readdirSync(sourceDirectory, { withFileTypes: true })) {
+    const source = path.join(sourceDirectory, entry.name)
+    const target = path.join(targetDirectory, entry.name)
     fs.cpSync(source, target, { recursive: true, force: true })
   }
-  const executable = path.join(releaseRoot, 'Jellyfin MPV Player.exe')
+}
+
+function copyRuntime(stagingDirectory, archiveDirectory) {
+  if (!fs.existsSync(stagingDirectory)) throw new Error(`没有找到解包构建目录：${stagingDirectory}`)
+  copyDirectoryContents(stagingDirectory, archiveDirectory)
+  const executable = path.join(archiveDirectory, 'Jellyfin MPV Player.exe')
   if (!fs.existsSync(executable)) throw new Error(`便携入口不存在：${executable}`)
 }
 
-run(npmCommand, ['run', 'release:check'])
-run(npmCommand, ['test'])
-run(npmCommand, ['run', 'test:contract'])
-run(npmCommand, ['run', 'build'])
+function quotePowerShell(value) {
+  return `'${value.replace(/'/g, "''")}'`
+}
 
-ensureDirectory(releaseRoot)
-archiveExistingOutput()
-ensureDirectory(rawDirectory)
-run(builderCommand, ['--win', '--dir'])
-copyRuntime()
-writeGuides()
-writeChecksums()
+function createZip(sourceDirectory, archivePath) {
+  if (process.platform !== 'win32') throw new Error('Windows ZIP 发布流程只能在 Windows 上运行')
+  if (fs.existsSync(archivePath)) fs.unlinkSync(archivePath)
+  const command = `Compress-Archive -Path ${quotePowerShell(path.join(sourceDirectory, '*'))} -DestinationPath ${quotePowerShell(archivePath)} -CompressionLevel Optimal`
+  const result = spawnSync('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', command], { cwd: root, stdio: 'inherit', shell: false })
+  if (result.error) throw result.error
+  if (result.status !== 0) throw new Error(`Compress-Archive failed with exit code ${result.status}`)
+  if (!fs.existsSync(archivePath)) throw new Error(`ZIP 文件未生成：${archivePath}`)
+}
 
-const internalVersionDirectory = uniqueDirectory(internalDirectory, version)
-fs.renameSync(rawDirectory, internalVersionDirectory)
-console.log(`Windows 便携发布包已整理完成：${releaseRoot}`)
+function writeZipChecksum(archivePath, checksumPath) {
+  const hash = crypto.createHash('sha256').update(fs.readFileSync(archivePath)).digest('hex')
+  fs.writeFileSync(checksumPath, `${hash}  ${path.basename(archivePath)}\n`, 'utf8')
+}
+
+const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'jellyfin-mpv-player-release-'))
+const builderOutput = path.join(temporaryRoot, 'builder')
+const archiveDirectory = path.join(temporaryRoot, 'portable')
+const stagingDirectory = path.join(builderOutput, 'win-unpacked')
+const archivePath = path.join(releaseRoot, archiveName)
+const checksumPath = path.join(releaseRoot, checksumName)
+
+try {
+  run(npmCommand, ['run', 'release:check'])
+  run(npmCommand, ['run', 'test:coverage'])
+  run(npmCommand, ['run', 'test:contract'])
+  run(npmCommand, ['run', 'build'])
+  ensureDirectory(releaseRoot)
+  run(builderCommand, ['--win', '--dir', `--config.directories.output=${builderOutput}`])
+  copyRuntime(stagingDirectory, archiveDirectory)
+  writeGuides(archiveDirectory)
+  createZip(archiveDirectory, archivePath)
+  writeZipChecksum(archivePath, checksumPath)
+  console.log(`Windows 便携发布 ZIP 已生成：${archivePath}`)
+  console.log(`SHA256 校验文件已生成：${checksumPath}`)
+} finally {
+  fs.rmSync(temporaryRoot, { recursive: true, force: true })
+}

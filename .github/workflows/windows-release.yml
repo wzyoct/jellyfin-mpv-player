@@ -1,0 +1,96 @@
+name: Windows Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jellyfin-mpv-player-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Package and publish Windows x64 release
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate release tag and metadata
+        shell: pwsh
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $package = Get-Content package.json -Raw | ConvertFrom-Json
+          $notes = Get-Content src/data/release-notes.json -Raw | ConvertFrom-Json
+          if ($tag -ne "v$($package.version)") {
+            throw "Tag $tag does not match package version $($package.version)"
+          }
+          if ($notes[0].version -ne $package.version) {
+            throw "The first release note does not match package version $($package.version)"
+          }
+
+      - name: Run tests with coverage
+        run: npm run test:coverage
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Verify Electron contracts
+        run: npm run test:contract
+
+      - name: Build and package Windows x64 ZIP
+        run: npm run release:windows
+
+      - name: Create draft GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $package = Get-Content package.json -Raw | ConvertFrom-Json
+          $zip = "release/Jellyfin-MPV-Player-v$($package.version)-win-x64.zip"
+          $checksum = "$zip.sha256"
+          gh release create $tag $zip $checksum --draft --verify-tag --title "Jellyfin MPV Player v$($package.version)" --notes-file release/发布信息/03-更新记录.txt
+
+      - name: Download draft assets into a clean directory and smoke test
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $clean = Join-Path $env:RUNNER_TEMP 'jellyfin-mpv-player-release-smoke'
+          New-Item -ItemType Directory -Path $clean -Force | Out-Null
+          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" | ConvertFrom-Json | Where-Object { $_.tag_name -eq $env:GITHUB_REF_NAME -and $_.draft } | Select-Object -First 1
+          if (-not $release) { throw "Draft release was not found" }
+          $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          $asset = $release.assets | Where-Object { $_.name -eq "Jellyfin-MPV-Player-v$version-win-x64.zip" } | Select-Object -First 1
+          if (-not $asset) { throw "Draft ZIP asset was not found" }
+          gh api -H 'Accept: application/octet-stream' "repos/$env:GITHUB_REPOSITORY/releases/assets/$($asset.id)" --output (Join-Path $clean $asset.name)
+          Expand-Archive -LiteralPath (Join-Path $clean $asset.name) -DestinationPath (Join-Path $clean 'expanded')
+          $entries = Get-ChildItem -LiteralPath (Join-Path $clean 'expanded') -Recurse -Force
+          if (-not (Test-Path (Join-Path $clean 'expanded/Jellyfin MPV Player.exe'))) { throw 'Portable executable is missing' }
+          $forbidden = $entries | Where-Object { $_.FullName -match '\\(data|历史版本|构建内部文件|settings\.json|logs)(\\|$)' }
+          if ($forbidden) { throw "Forbidden release entry: $($forbidden[0].FullName)" }
+
+      - name: Publish draft GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $release = gh api "repos/$env:GITHUB_REPOSITORY/releases?per_page=100" | ConvertFrom-Json | Where-Object { $_.tag_name -eq $env:GITHUB_REF_NAME -and $_.draft } | Select-Object -First 1
+          if (-not $release) { throw "Draft release was not found" }
+          gh api --method PATCH "repos/$env:GITHUB_REPOSITORY/releases/$($release.id)" -f draft=false

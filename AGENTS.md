@@ -19,7 +19,7 @@
 ## 安全与环境
 
 - 不硬编码密钥、凭据或令牌；数据库使用参数化查询；在系统边界校验和清理外部输入。
-- Windows 访问 Linux 主机 `[redacted-local-address]` 时优先使用 `http://[redacted-local-address]:<port>`。
+- Windows 访问 Linux 主机时优先使用对应服务的 HTTP 地址。
 - 仅在任务确实需要且普通权限不足时使用管理员权限；确需且本机缺失的通用工具可直接安装。
 
 ## 验证与收尾
