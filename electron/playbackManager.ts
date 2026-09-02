@@ -58,6 +58,7 @@ interface PlaybackEntry extends PlaybackQueueItem {
   activePlaylistEntryId?: number
   activePlaylistIndex?: number
   loaded: boolean
+  activation?: Promise<void>
   subtitleRoute?: SubtitleRoute
   localSubtitlePath?: string
   preparing?: Promise<PlaybackEntry>
@@ -93,7 +94,6 @@ interface PlaybackSession {
   endReason?: string
   audioPreference?: AudioPreference
   subtitlePreference?: SubtitlePreference
-  localSubtitlePath?: string
   mediaSourceId?: string
   selectedItemId: string
   abortController: AbortController
@@ -249,7 +249,7 @@ async function prepareEntry(session: PlaybackSession, item: MediaItem, startTime
     throw new Error(`《${item.Name}》未找到用户指定的字幕轨道 ${session.subtitlePreference.index}`)
   }
   const subtitle = subtitleStreamIndex === undefined ? undefined : streams.find((stream) => stream.Type === 'Subtitle' && stream.Index === subtitleStreamIndex)
-  const localSubtitlePath = isSelected ? session.localSubtitlePath || findSidecarSubtitle(source.Path) : undefined
+  const localSubtitlePath = isSelected ? findSidecarSubtitle(source.Path) : undefined
   const route = client.buildPlaybackRoute(item.Id, source, {
     audioStreamIndex,
     subtitleStreamIndex,
@@ -515,9 +515,20 @@ async function seekEntry(session: PlaybackSession, entry: PlaybackEntry, startTi
 
 async function activateLoadedEntry(session: PlaybackSession, entry: PlaybackEntry): Promise<void> {
   if (entry.loaded || session.stopped) return
+  if (entry.activation) return entry.activation
+  const activation = activateLoadedEntryInternal(session, entry)
+  entry.activation = activation
+  try {
+    await activation
+  } finally {
+    if (entry.activation === activation) entry.activation = undefined
+  }
+}
+
+async function activateLoadedEntryInternal(session: PlaybackSession, entry: PlaybackEntry): Promise<void> {
+  logger.info('playback', 'activation-start', { sessionId: session.sessionId, itemId: entry.itemId, queueIndex: session.currentIndex })
   await ensureEntryPrepared(session, entry)
   if (!entry.source || !entry.playbackInfo || !entry.routeKind) throw new Error(`《${entry.name}》播放资源尚未准备好`)
-  entry.loaded = true
   if (entry.initialResumeTicks > 0) await seekEntry(session, entry, entry.initialResumeTicks)
   let subtitleWarning: string | undefined
   const localSubtitlePath = entry.localSubtitlePath
@@ -526,7 +537,6 @@ async function activateLoadedEntry(session: PlaybackSession, entry: PlaybackEntr
       await session.ipc.send(['sub-add', localSubtitlePath, 'select'])
       logger.info('playback', 'local-subtitle-added', { sessionId: session.sessionId, itemId: entry.itemId })
     } catch (error) {
-      if (session.localSubtitlePath) throw new Error(`《${entry.name}》本地外挂字幕加载失败：${error instanceof Error ? error.message : String(error)}`)
       subtitleWarning = `《${entry.name}》同目录外挂字幕加载失败，已继续无字幕播放`
       logger.warn('playback', 'optional-local-subtitle-failed', { sessionId: session.sessionId, itemId: entry.itemId, reason: error })
     }
@@ -581,6 +591,7 @@ async function activateLoadedEntry(session: PlaybackSession, entry: PlaybackEntr
   }
   entry.isPaused = false
   await session.ipc.setProperty('pause', false)
+  entry.loaded = true
   const client = optionalClient()
   if (client) {
     try {
@@ -591,7 +602,7 @@ async function activateLoadedEntry(session: PlaybackSession, entry: PlaybackEntr
     }
   }
   session.phase = 'playing'
-  logger.info('playback', 'playing', { sessionId: session.sessionId, itemId: entry.itemId, index: session.currentIndex })
+  logger.info('playback', 'activation-complete', { sessionId: session.sessionId, itemId: entry.itemId, queueIndex: session.currentIndex })
   if (subtitleWarning) emitPlayback('warning', session, subtitleWarning)
   else emitPlayback('snapshot', session)
   void prefetchNextEntry(session)
@@ -899,7 +910,6 @@ async function startPlaybackInternal(request: StartPlaybackRequest): Promise<Pla
     startupPending: true,
     audioPreference: request.audioPreference,
     subtitlePreference: request.subtitlePreference,
-    localSubtitlePath: request.localSubtitlePath,
     selectedItemId: request.itemId,
     abortController: new AbortController(),
     gateway: new PlaybackGateway(client),

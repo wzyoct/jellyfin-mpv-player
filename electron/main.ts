@@ -321,14 +321,6 @@ function registerIpc(): void {
     const result = testMpvPath(mpvPath)
     return result
   })
-  ipcMain.handle('subtitle:choose-file', async () => {
-    const result = await dialog.showOpenDialog({
-      title: '选择外挂字幕',
-      properties: ['openFile'],
-      filters: [{ name: '字幕文件', extensions: ['ass', 'ssa', 'srt', 'vtt', 'smi', 'sub'] }],
-    })
-    return result.canceled ? null : result.filePaths[0] || null
-  })
   ipcMain.handle('playback:start', async (_event, request: StartPlaybackRequest) => {
     try {
       return await playbackManager.start(request)

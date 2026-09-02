@@ -107,6 +107,18 @@ describe('MpvIpc socket lifecycle', () => {
     await expect(ipc.getProperty('duration')).rejects.toThrow('MPV IPC 未连接')
   })
 
+  it('rejects pending calls immediately when the socket disconnects', async () => {
+    const ipc = new MpvIpc('fake-pipe')
+    const events: unknown[] = []
+    ipc.onEvent((message) => events.push(message))
+    await ipc.connectWithRetry(1000)
+    const pending = ipc.send(['get_property', 'duration'], 1000)
+    const rejection = pending.catch((error: unknown) => error)
+    socket.emit('close')
+    await expect(rejection).resolves.toMatchObject({ message: 'MPV IPC 连接已断开' })
+    expect(events).toContainEqual({ event: 'ipc-closed' })
+  })
+
   it('times out while waiting for a matching event', async () => {
     const ipc = new MpvIpc('fake-pipe')
     await ipc.connectWithRetry(1000)

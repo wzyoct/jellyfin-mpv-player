@@ -18,7 +18,7 @@
 
 Jellyfin 的 Stream Index 在 MPV `track-list` 的 `ff-index` 中匹配，分别设置 `aid` 和 `sid`。字幕选择不变量是：外挂简中、外挂其他中文、服务端默认外挂、第一条外挂；无外挂时才选择内嵌简中、内嵌其他中文、服务端默认内嵌，否则关闭。`DeliveryMethod=Encode` 等无独立轨道的烧录字幕被排除。起播集严格校验显式轨道索引和外挂/内嵌类别，后续集只在同类别内依次按语言与编码、标题与编码、语言、标题匹配，失败后执行该集默认规则；显式关闭字幕是会话级偏好。打开详情时只展示默认选择，只有实际改选或关闭才形成显式偏好。
 
-外挂字幕按当前媒体源生成标准 Jellyfin 字幕接口 `Videos/{itemId}/{mediaSourceId}/Subtitles/{index}/0/Stream.{format}`，再经携带 Jellyfin 鉴权的本地网关交给 MPV `sub-add <url> select`；不直接依赖 STRM 场景下可能不完整的 `DeliveryUrl`。STRM 媒体源如果返回 Windows 可访问的 `.strm` 路径，则也会优先查找同目录同名字幕或目录中唯一的字幕文件，并沿 `本地文件路径 → MPV sub-add <path> select` 挂载。用户在详情页选择的本地字幕优先级更高。内嵌字幕继续使用 MPV `track-list` 的 `ff-index` 映射 `sid`。缺少服务器字幕地址、网关或自动字幕 `sub-add` 失败时显式设置 `sid=no` 并继续无字幕播放，避免误显示内嵌字幕；用户显式选择的服务器或本地字幕加载失败都会抛出带片名的可见错误，不静默改选其他字幕。PlaybackInfo 使用 60 秒独立超时，Playing、Progress 和 Stopped 请求统一由主进程发送，并在日志中只记录脱敏的媒体源、路由类型、准备阶段、耗时和状态码。
+外挂字幕按当前媒体源生成标准 Jellyfin 字幕接口 `Videos/{itemId}/{mediaSourceId}/Subtitles/{index}/0/Stream.{format}`，再经携带 Jellyfin 鉴权的本地网关交给 MPV `sub-add <url> select`；不直接依赖 STRM 场景下可能不完整的 `DeliveryUrl`。STRM 媒体源如果返回 Windows 可访问的 `.strm` 路径，则也会优先查找同目录同名字幕或目录中唯一的字幕文件，并沿 `本地文件路径 → MPV sub-add <path> select` 挂载。详情页不提供手动本地字幕选择，避免绕过媒体库字幕来源。内嵌字幕继续使用 MPV `track-list` 的 `ff-index` 映射 `sid`。缺少服务器字幕地址、网关或自动字幕 `sub-add` 失败时显式设置 `sid=no` 并继续无字幕播放。播放条目激活采用单飞 Promise，启动等待和 `file-loaded` 事件共享同一次字幕、音轨和暂停状态初始化；MPV IPC 断开时立即拒绝待处理请求。PlaybackInfo 使用 60 秒独立超时，Playing、Progress 和 Stopped 请求统一由主进程发送，并在日志中只记录脱敏的媒体源、路由类型、准备阶段、耗时和状态码。
 
 ## 配置与发布
 
